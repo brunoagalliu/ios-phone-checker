@@ -4,7 +4,6 @@ import { useState } from 'react';
 import Papa from 'papaparse';
 
 export default function Home() {
-  const [apiKey, setApiKey] = useState('');
   const [file, setFile] = useState(null);
   const [processing, setProcessing] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
@@ -40,11 +39,6 @@ export default function Home() {
   };
 
   const processCSV = async () => {
-    if (!apiKey.trim()) {
-      setError('Please enter your Blooio API key');
-      return;
-    }
-
     if (!file) {
       setError('Please upload a CSV file');
       return;
@@ -88,7 +82,7 @@ export default function Home() {
           // Generate batch ID
           const batchId = `batch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-          // Send to API for processing
+          // Send to API for processing (API key is handled server-side)
           const response = await fetch('/api/check-batch', {
             method: 'POST',
             headers: {
@@ -96,7 +90,6 @@ export default function Home() {
             },
             body: JSON.stringify({
               phones: phones,
-              apiKey: apiKey,
               batchId: batchId
             }),
           });
@@ -169,26 +162,13 @@ export default function Home() {
         <p style={styles.subtitle}>Upload CSV, check iMessage support, download results</p>
 
         <div style={styles.infoBox}>
-          <strong>⚠️ Requirements</strong>
+          <strong>✅ Ready to Use</strong>
           <ul style={{ marginTop: '10px', paddingLeft: '20px' }}>
-            <li>Blooio API key (Dedicated plan: $699/mo)</li>
-            <li>CSV file with phone numbers in E.164 format (+1234567890)</li>
+            <li>API key configured on server (secure)</li>
+            <li>Upload CSV with phone numbers in E.164 format (+1234567890)</li>
             <li>Column header should be: phone, phone_number, mobile, or number</li>
+            <li>Processing may take a few minutes depending on file size</li>
           </ul>
-        </div>
-
-        <div style={styles.apiKeySection}>
-          <h3 style={styles.sectionTitle}>🔑 API Configuration</h3>
-          <div style={styles.inputGroup}>
-            <label style={styles.label}>Blooio API Key</label>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="Enter your Blooio API key"
-              style={styles.input}
-            />
-          </div>
         </div>
 
         <div style={styles.inputGroup}>
@@ -225,14 +205,15 @@ export default function Home() {
         {processing && (
           <div style={styles.processingBox}>
             <div style={styles.spinner}></div>
-            <div style={{ marginTop: '15px' }}>
+            <div style={{ marginTop: '15px', fontSize: '16px', fontWeight: '600' }}>
               Processing phone numbers...
             </div>
-            {progress.total > 0 && (
-              <div style={{ marginTop: '10px', fontSize: '14px' }}>
-                Please wait, this may take a few minutes
-              </div>
-            )}
+            <div style={{ marginTop: '10px', fontSize: '14px' }}>
+              Please wait, this may take several minutes
+            </div>
+            <div style={{ marginTop: '5px', fontSize: '12px', color: '#666' }}>
+              Rate limited to prevent API throttling
+            </div>
           </div>
         )}
 
@@ -308,16 +289,21 @@ export default function Home() {
                   </tbody>
                 </table>
               </div>
+              {results.length > 10 && (
+                <div style={{ marginTop: '10px', fontSize: '13px', color: '#666', textAlign: 'center' }}>
+                  Showing first 10 of {results.length} results. Download CSV for complete data.
+                </div>
+              )}
             </div>
           </div>
         )}
 
         <button
           onClick={processCSV}
-          disabled={processing || !file || !apiKey}
+          disabled={processing || !file}
           style={{
             ...styles.button,
-            ...(processing || !file || !apiKey ? styles.buttonDisabled : {})
+            ...(processing || !file ? styles.buttonDisabled : {})
           }}
         >
           {processing ? 'Processing...' : '🚀 Start Processing'}
@@ -331,8 +317,17 @@ export default function Home() {
 +14155559876
 +13105558765`}
           </pre>
+          <div style={{ marginTop: '10px', fontSize: '12px' }}>
+            <strong>Supported column names:</strong> phone, phone_number, mobile, number, cell, telephone
+          </div>
         </div>
       </div>
+
+      <style jsx>{`
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
     </div>
   );
 }
@@ -368,24 +363,13 @@ const styles = {
     fontSize: '14px',
   },
   infoBox: {
-    background: '#fff3cd',
-    border: '1px solid #ffc107',
+    background: '#d4edda',
+    border: '1px solid #28a745',
     borderRadius: '10px',
     padding: '15px',
     marginBottom: '20px',
     fontSize: '13px',
-    color: '#856404',
-  },
-  apiKeySection: {
-    background: '#f8f9fa',
-    borderRadius: '10px',
-    padding: '20px',
-    marginBottom: '20px',
-  },
-  sectionTitle: {
-    color: '#333',
-    fontSize: '16px',
-    marginBottom: '10px',
+    color: '#155724',
   },
   inputGroup: {
     marginBottom: '20px',
@@ -396,14 +380,6 @@ const styles = {
     color: '#555',
     fontWeight: '500',
     fontSize: '14px',
-  },
-  input: {
-    width: '100%',
-    padding: '12px 16px',
-    border: '2px solid #e0e0e0',
-    borderRadius: '10px',
-    fontSize: '16px',
-    boxSizing: 'border-box',
   },
   uploadZone: {
     border: '3px dashed #d0d0d0',
@@ -513,6 +489,11 @@ const styles = {
   },
   previewSection: {
     marginTop: '20px',
+  },
+  sectionTitle: {
+    fontSize: '18px',
+    fontWeight: '600',
+    marginBottom: '15px',
   },
   tableContainer: {
     overflowX: 'auto',
