@@ -135,14 +135,17 @@ export default function Home() {
     if (!results) return;
 
     const csv = Papa.unparse(results.map(r => ({
-      phone_number: r.phone_number,
-      is_ios: r.is_ios ? 'YES' : 'NO',
-      supports_imessage: r.supports_imessage ? 'YES' : 'NO',
-      supports_sms: r.supports_sms ? 'YES' : 'NO',
-      contact_type: r.contact_type || 'N/A',
-      error: r.error || 'None',
-      checked_at: new Date().toISOString()
-    })));
+        phone_number: r.phone_number,
+        is_ios: r.is_ios ? 'YES' : 'NO',
+        supports_imessage: r.supports_imessage ? 'YES' : 'NO',
+        supports_sms: r.supports_sms ? 'YES' : 'NO',
+        contact_type: r.contact_type || 'N/A',
+        from_cache: r.from_cache ? 'YES' : 'NO',
+        cache_age_days: r.cache_age_days || 'N/A',
+        source: r.source || 'N/A',
+        error: r.error || 'None',
+        checked_at: new Date().toISOString()
+      })));
 
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = window.URL.createObjectURL(blob);
@@ -220,6 +223,19 @@ export default function Home() {
         {results && (
           <div style={styles.resultsBox}>
             <h3 style={styles.sectionTitle}>✅ Processing Complete!</h3>
+            {/* CACHE STATISTICS */}
+    {results.filter(r => r.from_cache).length > 0 && (
+      <div style={{...styles.infoBox, background: '#d1ecf1', border: '1px solid #17a2b8', marginBottom: '20px'}}>
+        <strong>💾 Cache Performance</strong>
+        <div style={{marginTop: '10px', fontSize: '13px'}}>
+          ✅ {results.filter(r => r.from_cache).length} numbers retrieved from cache<br/>
+          🚀 {results.filter(r => r.from_cache).length} API calls saved<br/>
+          💰 Estimated cost saved: ${(results.filter(r => r.from_cache).length * 0.01).toFixed(2)}
+        </div>
+      </div>
+    )}
+
+
             <div style={styles.statsGrid}>
               <div style={styles.statCard}>
                 <div style={styles.statNumber}>{results.length}</div>
