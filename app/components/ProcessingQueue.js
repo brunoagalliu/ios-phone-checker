@@ -58,20 +58,25 @@ function FileProcessingItem({ file }) {
       </div>
 
       {file.status === 'processing' && file.totalNumbers > 0 && (
-        <div style={styles.progressContainer}>
-          <div style={styles.progressBar}>
-            <div
-              style={{
-                ...styles.progressFill,
-                width: `${(file.processedCount / file.validNumbers) * 100}%`,
-              }}
-            />
+        <>
+          <div style={styles.progressContainer}>
+            <div style={styles.progressBar}>
+              <div
+                style={{
+                  ...styles.progressFill,
+                  width: `${(file.processedCount / file.validNumbers) * 100}%`,
+                }}
+              />
+            </div>
+            <div style={styles.progressText}>
+              {file.processedCount} / {file.validNumbers} 
+              ({Math.round((file.processedCount / file.validNumbers) * 100)}%)
+            </div>
           </div>
-          <div style={styles.progressText}>
-            {file.processedCount} / {file.validNumbers} 
-            ({Math.round((file.processedCount / file.validNumbers) * 100)}%)
+          <div style={styles.rateLimitInfo}>
+            ⏱️ Rate limited: 4 requests/second (250ms between requests)
           </div>
-        </div>
+        </>
       )}
 
       {file.validationResults && (
@@ -85,6 +90,27 @@ function FileProcessingItem({ file }) {
       {file.error && (
         <div style={styles.errorMessage}>
           Error: {file.error}
+        </div>
+      )}
+
+      {file.status === 'completed' && file.results && (
+        <div style={styles.completionInfo}>
+          <div style={styles.completionStats}>
+            <span style={styles.completionStat}>
+              📊 {file.results.length} checked
+            </span>
+            <span style={styles.completionStat}>
+              📱 {file.results.filter(r => r.is_ios).length} iOS
+            </span>
+            <span style={styles.completionStat}>
+              💾 {file.results.filter(r => r.from_cache).length} cached
+            </span>
+            {file.results.filter(r => r.error).length > 0 && (
+              <span style={styles.completionStat}>
+                ⚠️ {file.results.filter(r => r.error).length} errors
+              </span>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -165,6 +191,16 @@ const styles = {
     marginTop: '5px',
     textAlign: 'right',
   },
+  rateLimitInfo: {
+    fontSize: '11px',
+    color: '#666',
+    marginTop: '8px',
+    fontStyle: 'italic',
+    textAlign: 'center',
+    padding: '5px',
+    background: '#fff3cd',
+    borderRadius: '4px',
+  },
   validationSummary: {
     display: 'flex',
     gap: '8px',
@@ -202,5 +238,21 @@ const styles = {
     color: '#721c24',
     borderRadius: '4px',
     fontSize: '12px',
+  },
+  completionInfo: {
+    marginTop: '10px',
+    padding: '10px',
+    background: '#d4edda',
+    borderRadius: '4px',
+  },
+  completionStats: {
+    display: 'flex',
+    gap: '12px',
+    flexWrap: 'wrap',
+    fontSize: '12px',
+    color: '#155724',
+  },
+  completionStat: {
+    fontWeight: '500',
   },
 };

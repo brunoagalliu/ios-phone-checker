@@ -6,17 +6,12 @@ import {
   updateFileStatus 
 } from '../../../lib/db.js';
 import { processPhoneArray } from '../../../lib/phoneValidator.js';
+import blooioRateLimiter from '../../../lib/rateLimiter.js';
 
 const BLOOIO_API_URL = 'https://backend.blooio.com/v1/api/contacts';
-const RATE_LIMIT_DELAY = parseInt(process.env.RATE_LIMIT_DELAY_MS) || 500;
-
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
 
 async function checkSingleNumberWithCache(phoneNumber, batchId, fileId) {
-  // phoneNumber is already validated and formatted at this point
-  const formattedPhone = `+${phoneNumber}`; // Convert to E.164
+  const formattedPhone = `+${phoneNumber}`;
   
   // Check cache first
   try {
@@ -43,7 +38,7 @@ async function checkSingleNumberWithCache(phoneNumber, batchId, fileId) {
     console.error(`Cache check error for ${formattedPhone}:`, cacheError);
   }
   
-  // Not in cache - check via API
+  // Not in cache - check via API with rate limiting
   const apiKey = process.env.BLOOIO_API_KEY;
   
   if (!apiKey) {
@@ -61,67 +56,72 @@ async function checkSingleNumberWithCache(phoneNumber, batchId, fileId) {
   try {
     console.log(`API call for: ${formattedPhone}`);
     
-    const response = await fetch(
-      `${BLOOIO_API_URL}/${encodeURIComponent(formattedPhone)}/capabilities`,
-      {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Accept': 'application/json'
-        },
-        signal: AbortSignal.timeout(30000)
-      }
-    );
-    
-    if (!response.ok) {
-      let errorMessage = `HTTP ${response.status}`;
-      
-      try {
-        const errorData = await response.json();
-        errorMessage = errorData.message || errorData.error || errorMessage;
-        
-        if (response.status === 503 && errorMessage.includes('No active devices')) {
-          errorMessage = 'Blooio: No active devices available';
+    // Use rate limiter to execute the API call
+    const result = await blooioRateLimiter.execute(async () => {
+      const response = await fetch(
+        `${BLOOIO_API_URL}/${encodeURIComponent(formattedPhone)}/capabilities`,
+        {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Accept': 'application/json'
+          },
+          signal: AbortSignal.timeout(30000)
         }
-      } catch (e) {
-        const errorText = await response.text();
-        errorMessage = errorText || errorMessage;
+      );
+      
+      if (!response.ok) {
+        let errorMessage = `HTTP ${response.status}`;
+        
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.message || errorData.error || errorMessage;
+          
+          if (response.status === 503 && errorMessage.includes('No active devices')) {
+            errorMessage = 'Blooio: No active devices available';
+          }
+        } catch (e) {
+          const errorText = await response.text();
+          errorMessage = errorText || errorMessage;
+        }
+        
+        if (response.status === 401) errorMessage = 'Invalid API key';
+        if (response.status === 403) errorMessage = 'API access forbidden';
+        if (response.status === 404) errorMessage = 'Phone number not found';
+        if (response.status === 429) errorMessage = 'Rate limit exceeded';
+        
+        return {
+          phone_number: formattedPhone,
+          error: errorMessage,
+          is_ios: false,
+          supports_imessage: false,
+          supports_sms: false,
+          from_cache: false,
+          source: 'api_error'
+        };
       }
       
-      if (response.status === 401) errorMessage = 'Invalid API key';
-      if (response.status === 403) errorMessage = 'API access forbidden';
-      if (response.status === 404) errorMessage = 'Phone number not found';
-      if (response.status === 429) errorMessage = 'Rate limit exceeded';
+      const data = await response.json();
+      const capabilities = data.capabilities || {};
+      const supportsIMessage = capabilities.imessage === true || capabilities.iMessage === true;
+      const supportsSMS = capabilities.sms === true || capabilities.SMS === true;
       
       return {
         phone_number: formattedPhone,
-        error: errorMessage,
-        is_ios: false,
-        supports_imessage: false,
-        supports_sms: false,
+        contact_id: data.contact,
+        contact_type: data.contact_type,
+        is_ios: supportsIMessage,
+        supports_imessage: supportsIMessage,
+        supports_sms: supportsSMS,
+        last_checked_at: data.last_checked_at,
+        error: null,
         from_cache: false,
-        source: 'api_error'
+        source: 'api',
+        batch_id: batchId
       };
-    }
+    });
     
-    const data = await response.json();
-    const capabilities = data.capabilities || {};
-    const supportsIMessage = capabilities.imessage === true || capabilities.iMessage === true;
-    const supportsSMS = capabilities.sms === true || capabilities.SMS === true;
-    
-    return {
-      phone_number: formattedPhone,
-      contact_id: data.contact,
-      contact_type: data.contact_type,
-      is_ios: supportsIMessage,
-      supports_imessage: supportsIMessage,
-      supports_sms: supportsSMS,
-      last_checked_at: data.last_checked_at,
-      error: null,
-      from_cache: false,
-      source: 'api',
-      batch_id: batchId
-    };
+    return result;
     
   } catch (error) {
     console.error(`Error checking ${formattedPhone}:`, error);
@@ -158,6 +158,7 @@ export async function POST(request) {
     }
     
     console.log(`Starting batch: ${phones.length} numbers, batch ID: ${batchId}`);
+    console.log(`Rate limiter: 4 requests/second (250ms between requests)`);
     
     // STEP 1: Validate and format all phone numbers
     const validationResult = processPhoneArray(phones);
@@ -180,12 +181,13 @@ export async function POST(request) {
     const results = [];
     let cacheHits = 0;
     let apiCalls = 0;
+    const startTime = Date.now();
     
-    // STEP 3: Process only valid phone numbers
+    // STEP 3: Process only valid phone numbers with rate limiting
     for (let i = 0; i < validationResult.valid.length; i++) {
       const validPhone = validationResult.valid[i];
       
-      // Check with cache and API
+      // Check with cache and API (rate limited)
       const result = await checkSingleNumberWithCache(
         validPhone.formatted, 
         batchId, 
@@ -215,11 +217,13 @@ export async function POST(request) {
       results.push(result);
       
       const status = result.from_cache ? 'CACHE' : result.error ? 'ERROR' : 'API';
-      console.log(`[${i + 1}/${validationResult.valid.length}] ${validPhone.formatted} - ${status}`);
+      const progress = `[${i + 1}/${validationResult.valid.length}]`;
+      console.log(`${progress} ${validPhone.formatted} - ${status}`);
       
-      // Rate limiting only for API calls
-      if (!result.from_cache && i < validationResult.valid.length - 1) {
-        await delay(RATE_LIMIT_DELAY);
+      // Log rate limiter stats every 10 requests
+      if ((i + 1) % 10 === 0) {
+        const stats = blooioRateLimiter.getStats();
+        console.log(`Rate limiter: ${stats.timeSinceLastRequest}ms since last request`);
       }
     }
     
@@ -230,7 +234,12 @@ export async function POST(request) {
       duplicate_numbers: validationResult.stats.duplicates
     });
     
-    console.log(`Batch complete: ${cacheHits} from cache, ${apiCalls} API calls`);
+    const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
+    const avgTimePerRequest = validationResult.valid.length > 0 
+      ? ((Date.now() - startTime) / validationResult.valid.length / 1000).toFixed(2)
+      : 0;
+    
+    console.log(`Batch complete: ${cacheHits} from cache, ${apiCalls} API calls, ${totalTime}s total, ${avgTimePerRequest}s avg per request`);
     
     return NextResponse.json({
       success: true,
@@ -244,6 +253,12 @@ export async function POST(request) {
       total_success: results.filter(r => !r.error).length,
       total_errors: results.filter(r => r.error).length,
       api_calls_saved: cacheHits,
+      processing_time_seconds: parseFloat(totalTime),
+      avg_time_per_request: parseFloat(avgTimePerRequest),
+      rate_limit_info: {
+        requests_per_second: 4,
+        time_between_requests_ms: 250
+      },
       results: results
     });
     
