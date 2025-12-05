@@ -23,33 +23,39 @@ export default function FileHistory() {
     }
   };
 
-  const downloadFileResults = async (batchId, originalName) => {
-    try {
-      const response = await fetch(`/api/files?batchId=${batchId}`);
-      const data = await response.json();
-      
-      if (data.success && data.results) {
-        const csv = Papa.unparse(data.results.map(r => ({
-          phone_number: r.phone_number,
-          is_ios: r.is_ios ? 'YES' : 'NO',
-          supports_imessage: r.supports_imessage ? 'YES' : 'NO',
-          supports_sms: r.supports_sms ? 'YES' : 'NO',
-          error: r.error || 'None',
-          checked_at: r.last_checked
-        })));
-
-        const blob = new Blob([csv], { type: 'text/csv' });
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${originalName.replace('.csv', '')}_results.csv`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(url);
+  const downloadFileResults = async (batchId, originalName, resultsUrl) => {
+    if (resultsUrl) {
+      // Direct download from blob storage
+      window.open(resultsUrl, '_blank');
+    } else {
+      // Fallback to API fetch (old method)
+      try {
+        const response = await fetch(`/api/files?batchId=${batchId}`);
+        const data = await response.json();
+        
+        if (data.success && data.results) {
+          const csv = Papa.unparse(data.results.map(r => ({
+            phone_number: r.phone_number,
+            is_ios: r.is_ios ? 'YES' : 'NO',
+            supports_imessage: r.supports_imessage ? 'YES' : 'NO',
+            supports_sms: r.supports_sms ? 'YES' : 'NO',
+            error: r.error || 'None',
+            checked_at: r.last_checked
+          })));
+  
+          const blob = new Blob([csv], { type: 'text/csv' });
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${originalName.replace('.csv', '')}_results.csv`;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          window.URL.revokeObjectURL(url);
+        }
+      } catch (err) {
+        alert('Failed to download file results');
       }
-    } catch (err) {
-      alert('Failed to download file results');
     }
   };
 

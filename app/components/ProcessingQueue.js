@@ -93,26 +93,18 @@ function FileProcessingItem({ file }) {
         </div>
       )}
 
-      {file.status === 'completed' && file.results && (
-        <div style={styles.completionInfo}>
-          <div style={styles.completionStats}>
-            <span style={styles.completionStat}>
-              📊 {file.results.length} checked
-            </span>
-            <span style={styles.completionStat}>
-              📱 {file.results.filter(r => r.is_ios).length} iOS
-            </span>
-            <span style={styles.completionStat}>
-              💾 {file.results.filter(r => r.from_cache).length} cached
-            </span>
-            {file.results.filter(r => r.error).length > 0 && (
-              <span style={styles.completionStat}>
-                ⚠️ {file.results.filter(r => r.error).length} errors
-              </span>
-            )}
-          </div>
-        </div>
-      )}
+{file.status === 'completed' && file.resultsFileUrl && (
+  <div style={styles.downloadLinks}>
+    <a href={file.resultsFileUrl} download style={styles.downloadLink}>
+      ⬇️ Download Results
+    </a>
+    {file.originalFileUrl && (
+      <a href={file.originalFileUrl} download style={styles.downloadLink}>
+        📄 Download Original
+      </a>
+    )}
+  </div>
+)}
     </div>
   );
 }
@@ -254,5 +246,20 @@ const styles = {
   },
   completionStat: {
     fontWeight: '500',
+  },
+  downloadLinks: {
+    display: 'flex',
+    gap: '10px',
+    marginTop: '10px',
+  },
+  downloadLink: {
+    padding: '6px 12px',
+    background: '#28a745',
+    color: 'white',
+    borderRadius: '5px',
+    fontSize: '12px',
+    fontWeight: '600',
+    textDecoration: 'none',
+    display: 'inline-block',
   },
 };

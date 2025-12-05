@@ -61,82 +61,42 @@ export default function Home() {
   const processFile = async (fileItem) => {
     try {
       updateFileStatus(fileItem.id, { status: 'processing' });
-
-      // Parse CSV
-      Papa.parse(fileItem.file, {
-        header: true,
-        skipEmptyLines: true,
-        complete: async (parseResult) => {
-          const phones = [];
-          const phoneColumn = findPhoneColumn(parseResult.data);
-
-          if (!phoneColumn) {
-            updateFileStatus(fileItem.id, {
-              status: 'error',
-              error: 'Could not find phone number column'
-            });
-            return;
-          }
-
-          parseResult.data.forEach(row => {
-            const phone = row[phoneColumn];
-            if (phone) {
-              phones.push(phone.toString().trim());
-            }
-          });
-
-          if (phones.length === 0) {
-            updateFileStatus(fileItem.id, {
-              status: 'error',
-              error: 'No phone numbers found'
-            });
-            return;
-          }
-
-          updateFileStatus(fileItem.id, { totalNumbers: phones.length });
-
-          const batchId = `batch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-          // Call API
-          const response = await fetch('/api/check-batch', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              phones: phones,
-              batchId: batchId,
-              fileName: fileItem.name
-            }),
-          });
-
-          const data = await response.json();
-
-          if (!response.ok) {
-            throw new Error(data.error || 'Failed to process');
-          }
-
-          updateFileStatus(fileItem.id, {
-            status: 'completed',
-            validationResults: data.validation,
-            validNumbers: data.validation.valid,
-            processedCount: data.results.length,
-            results: data.results,
-            batchId: batchId
-          });
-
-          // Refresh file history
-          if (typeof FileHistory.refresh === 'function') {
-            FileHistory.refresh();
-          }
-        },
-        error: (error) => {
-          updateFileStatus(fileItem.id, {
-            status: 'error',
-            error: error.message
-          });
-        }
+  
+      const batchId = `batch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  
+      // Create FormData to send file
+      const formData = new FormData();
+      formData.append('file', fileItem.file);
+      formData.append('batchId', batchId);
+      formData.append('fileName', fileItem.name);
+  
+      // Call API
+      const response = await fetch('/api/check-batch', {
+        method: 'POST',
+        body: formData, // Send as FormData instead of JSON
       });
+  
+      const data = await response.json();
+  
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to process');
+      }
+  
+      updateFileStatus(fileItem.id, {
+        status: 'completed',
+        validationResults: data.validation,
+        validNumbers: data.validation.valid,
+        processedCount: data.results.length,
+        results: data.results,
+        batchId: batchId,
+        originalFileUrl: data.original_file_url,
+        resultsFileUrl: data.results_file_url
+      });
+  
+      // Refresh file history
+      if (typeof FileHistory.refresh === 'function') {
+        FileHistory.refresh();
+      }
     } catch (err) {
       updateFileStatus(fileItem.id, {
         status: 'error',
