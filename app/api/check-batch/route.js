@@ -1,5 +1,11 @@
 import { NextResponse } from 'next/server';
-import { savePhoneCheck, getCachedPhoneCheck } from '../../../lib/db.js';
+import { 
+  savePhoneCheckWithFile, 
+  getCachedPhoneCheck, 
+  saveUploadedFile, 
+  updateFileStatus 
+} from '../../../lib/db.js';
+import { processPhoneArray } from '../../../lib/phoneValidator.js';
 
 const BLOOIO_API_URL = 'https://backend.blooio.com/v1/api/contacts';
 const RATE_LIMIT_DELAY = parseInt(process.env.RATE_LIMIT_DELAY_MS) || 500;
@@ -8,59 +14,15 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function formatPhoneNumber(phone) {
-  let formatted = phone.toString().trim().replace(/[^\d+]/g, '');
+async function checkSingleNumberWithCache(phoneNumber, batchId, fileId) {
+  // phoneNumber is already validated and formatted at this point
+  const formattedPhone = `+${phoneNumber}`; // Convert to E.164
   
-  if (!formatted.startsWith('+')) {
-    formatted = '+' + formatted;
-  }
-  
-  return formatted;
-}
-
-function isValidE164(phone) {
-  return /^\+[1-9]\d{1,14}$/.test(phone);
-}
-
-function validatePhoneNumber(phone) {
-  const formatted = formatPhoneNumber(phone);
-  
-  if (!isValidE164(formatted)) {
-    return { valid: false, error: 'Invalid E.164 format', formatted };
-  }
-  
-  const digits = formatted.substring(1);
-  if (digits.length < 7 || digits.length > 15) {
-    return { valid: false, error: `Invalid length: ${digits.length} digits (must be 7-15)`, formatted };
-  }
-  
-  return { valid: true, formatted };
-}
-
-async function checkSingleNumberWithCache(phoneNumber, batchId) {
-  const validation = validatePhoneNumber(phoneNumber);
-  
-  if (!validation.valid) {
-    return {
-      phone_number: phoneNumber,
-      formatted_number: validation.formatted,
-      error: validation.error,
-      is_ios: false,
-      supports_imessage: false,
-      supports_sms: false,
-      from_cache: false,
-      source: 'validation_error'
-    };
-  }
-  
-  const formattedPhone = validation.formatted;
-  
-  // STEP 1: Check cache first (within 6 months)
+  // Check cache first
   try {
     const cachedResult = await getCachedPhoneCheck(formattedPhone);
     
     if (cachedResult) {
-      // Return cached result
       return {
         phone_number: formattedPhone,
         is_ios: cachedResult.is_ios,
@@ -74,15 +36,14 @@ async function checkSingleNumberWithCache(phoneNumber, batchId) {
         last_checked: cachedResult.last_checked,
         check_count: cachedResult.check_count,
         source: 'cache',
-        batch_id: batchId // Add to current batch
+        batch_id: batchId
       };
     }
   } catch (cacheError) {
     console.error(`Cache check error for ${formattedPhone}:`, cacheError);
-    // Continue to API call if cache fails
   }
   
-  // STEP 2: Not in cache or expired - check via API
+  // Not in cache - check via API
   const apiKey = process.env.BLOOIO_API_KEY;
   
   if (!apiKey) {
@@ -187,7 +148,7 @@ async function checkSingleNumberWithCache(phoneNumber, batchId) {
 
 export async function POST(request) {
   try {
-    const { phones, batchId } = await request.json();
+    const { phones, batchId, fileName } = await request.json();
     
     if (!phones || !Array.isArray(phones) || phones.length === 0) {
       return NextResponse.json(
@@ -198,16 +159,38 @@ export async function POST(request) {
     
     console.log(`Starting batch: ${phones.length} numbers, batch ID: ${batchId}`);
     
+    // STEP 1: Validate and format all phone numbers
+    const validationResult = processPhoneArray(phones);
+    
+    console.log(`Validation complete: ${validationResult.stats.valid} valid, ${validationResult.stats.invalid} invalid, ${validationResult.stats.duplicates} duplicates`);
+    
+    // STEP 2: Save file metadata to database
+    const fileId = await saveUploadedFile({
+      file_name: fileName || 'upload.csv',
+      original_name: fileName || 'upload.csv',
+      file_size: 0,
+      total_numbers: validationResult.stats.total,
+      valid_numbers: validationResult.stats.valid,
+      invalid_numbers: validationResult.stats.invalid,
+      duplicate_numbers: validationResult.stats.duplicates,
+      batch_id: batchId,
+      processing_status: 'processing'
+    });
+    
     const results = [];
-    const total = phones.length;
     let cacheHits = 0;
     let apiCalls = 0;
     
-    for (let i = 0; i < phones.length; i++) {
-      const phone = phones[i];
+    // STEP 3: Process only valid phone numbers
+    for (let i = 0; i < validationResult.valid.length; i++) {
+      const validPhone = validationResult.valid[i];
       
-      // Check with cache
-      const result = await checkSingleNumberWithCache(phone, batchId);
+      // Check with cache and API
+      const result = await checkSingleNumberWithCache(
+        validPhone.formatted, 
+        batchId, 
+        fileId
+      );
       
       // Track statistics
       if (result.from_cache) {
@@ -216,9 +199,14 @@ export async function POST(request) {
         apiCalls++;
       }
       
-      // Save to database (update or insert)
+      // Add original and formatted info
+      result.original_number = validPhone.original;
+      result.formatted_number = validPhone.formatted;
+      result.display_number = validPhone.display;
+      
+      // Save to database
       try {
-        await savePhoneCheck(result);
+        await savePhoneCheckWithFile(result, fileId);
       } catch (dbError) {
         console.error('Database save error:', dbError);
         result.db_error = 'Failed to save to database';
@@ -227,19 +215,29 @@ export async function POST(request) {
       results.push(result);
       
       const status = result.from_cache ? 'CACHE' : result.error ? 'ERROR' : 'API';
-      console.log(`[${i + 1}/${total}] ${phone} - ${status}${result.from_cache ? ` (${result.cache_age_days}d old)` : ''}`);
+      console.log(`[${i + 1}/${validationResult.valid.length}] ${validPhone.formatted} - ${status}`);
       
-      // Rate limiting only for API calls (not cached results)
-      if (!result.from_cache && i < phones.length - 1) {
+      // Rate limiting only for API calls
+      if (!result.from_cache && i < validationResult.valid.length - 1) {
         await delay(RATE_LIMIT_DELAY);
       }
     }
     
-    console.log(`Batch complete: ${cacheHits} from cache, ${apiCalls} API calls, ${results.filter(r => r.error).length} errors`);
+    // STEP 4: Update file status to completed
+    await updateFileStatus(fileId, 'completed', {
+      valid_numbers: validationResult.stats.valid,
+      invalid_numbers: validationResult.stats.invalid,
+      duplicate_numbers: validationResult.stats.duplicates
+    });
+    
+    console.log(`Batch complete: ${cacheHits} from cache, ${apiCalls} API calls`);
     
     return NextResponse.json({
       success: true,
       batch_id: batchId,
+      file_id: fileId,
+      validation: validationResult.stats,
+      invalid_numbers: validationResult.invalid,
       total_processed: results.length,
       cache_hits: cacheHits,
       api_calls: apiCalls,
