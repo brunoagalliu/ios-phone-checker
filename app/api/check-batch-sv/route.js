@@ -5,11 +5,13 @@ import {
   updateFileResultsURL
 } from '../../../lib/db.js';
 import { processPhoneArray } from '../../../lib/phoneValidator.js';
-import { uploadFile, uploadResultsAsCSV } from '../../../lib/blobStorage.js';
+import { uploadFile } from '../../../lib/blobStorage.js';
 import { checkBulkInBatches, categorizeBulkResults } from '../../../lib/subscriberVerify.js';
 import Papa from 'papaparse';
 
 export async function POST(request) {
+  let fileId = null;
+  
   try {
     const formData = await request.formData();
     const file = formData.get('file');
@@ -28,6 +30,8 @@ export async function POST(request) {
     // Upload original file to Vercel Blob
     const fileBuffer = Buffer.from(await file.arrayBuffer());
     const originalFileBlob = await uploadFile(fileBuffer, fileName, 'originals');
+    
+    console.log(`Original file uploaded to: ${originalFileBlob.url}`);
     
     // Parse CSV
     const fileText = await file.text();
@@ -66,7 +70,7 @@ export async function POST(request) {
     console.log(`Validation: ${validationResult.stats.valid} valid US numbers`);
     
     // Save file metadata
-    const fileId = await saveUploadedFile({
+    fileId = await saveUploadedFile({
       file_name: fileName,
       original_name: fileName,
       file_size: file.size,
@@ -80,18 +84,23 @@ export async function POST(request) {
       original_file_size: originalFileBlob.size
     });
     
+    console.log(`File saved to database with ID: ${fileId}`);
+    
     const startTime = Date.now();
     
-    // Convert to 10-digit format for SubscriberVerify
+    // Convert to 10-digit format for SubscriberVerify (remove +1)
     const svPhones = validationResult.valid.map(v => v.formatted.replace(/^\+?1/, ''));
     
     console.log(`Checking ${svPhones.length} numbers with SubscriberVerify bulk API...`);
     
     // Bulk check with SubscriberVerify
     const svBulkResults = await checkBulkInBatches(svPhones);
+    
+    console.log(`SubscriberVerify returned ${svBulkResults.length} results`);
+    
     const categorized = categorizeBulkResults(svBulkResults);
     
-    console.log(`SubscriberVerify results: send=${categorized.send.length}, unsubscribe=${categorized.unsubscribe.length}, blacklist=${categorized.blacklist.length}`);
+    console.log(`SubscriberVerify categorized: send=${categorized.send.length}, unsubscribe=${categorized.unsubscribe.length}, blacklist=${categorized.blacklist.length}, error=${categorized.error.length}`);
     
     // Format results for CSV
     const results = svBulkResults.map((svResult, index) => {
@@ -101,7 +110,7 @@ export async function POST(request) {
         original_number: validPhone.original,
         formatted_number: validPhone.formatted,
         display_number: validPhone.display,
-        action: svResult.action,
+        action: svResult.action || 'unknown',
         reason: svResult.reason || '',
         deliverable: svResult.action === 'send',
         carrier: svResult.dipCarrier || svResult.nanpCarrier || '',
@@ -116,12 +125,18 @@ export async function POST(request) {
       };
     });
     
+    console.log(`Formatted ${results.length} results for CSV`);
+    
     // Upload results CSV
     const csv = Papa.unparse(results);
     const resultsFileName = `${fileName.replace('.csv', '')}_sv_results_${Date.now()}.csv`;
     const resultsBlob = await uploadFile(Buffer.from(csv), resultsFileName, 'results');
     
+    console.log(`Results uploaded to: ${resultsBlob.url}`);
+    
     await updateFileResultsURL(fileId, resultsBlob.url, resultsBlob.size);
+    console.log(`File results URL updated in database`);
+    
     await updateFileStatus(fileId, 'completed', {
       valid_numbers: validationResult.stats.valid,
       invalid_numbers: validationResult.stats.invalid,
@@ -130,6 +145,8 @@ export async function POST(request) {
       sv_unsubscribe_count: categorized.unsubscribe.length,
       sv_blacklist_count: categorized.blacklist.length
     });
+    
+    console.log(`File status updated to completed`);
     
     const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
     
@@ -156,8 +173,23 @@ export async function POST(request) {
     
   } catch (error) {
     console.error('SubscriberVerify batch error:', error);
+    console.error('Error stack:', error.stack);
+    
+    // Mark file as failed if we have a fileId
+    if (fileId) {
+      try {
+        await updateFileStatus(fileId, 'failed');
+        console.log(`Marked file ${fileId} as failed`);
+      } catch (updateError) {
+        console.error('Failed to update file status:', updateError);
+      }
+    }
+    
     return NextResponse.json(
-      { error: error.message || 'Internal server error' },
+      { 
+        error: error.message || 'Internal server error', 
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined 
+      },
       { status: 500 }
     );
   }
