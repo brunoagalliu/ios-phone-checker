@@ -11,14 +11,14 @@ export default function Home() {
   const [processingFiles, setProcessingFiles] = useState([]);
   const [error, setError] = useState(null);
 
-  const handleFilesSelected = async (files) => {
+  const handleFilesSelected = async (files, service) => {
     setError(null);
     
-    // Add files to processing queue
     const newFiles = files.map(file => ({
       id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       name: file.name,
       file: file,
+      service: service, // 'blooio' or 'subscriberverify'
       status: 'queued',
       totalNumbers: 0,
       validNumbers: 0,
@@ -27,10 +27,9 @@ export default function Home() {
       results: null,
       error: null,
     }));
-
+  
     setProcessingFiles(prev => [...prev, ...newFiles]);
-
-    // Process each file sequentially
+  
     for (const fileItem of newFiles) {
       await processFile(fileItem);
     }
@@ -64,16 +63,19 @@ export default function Home() {
   
       const batchId = `batch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   
-      // Create FormData to send file
       const formData = new FormData();
       formData.append('file', fileItem.file);
       formData.append('batchId', batchId);
       formData.append('fileName', fileItem.name);
   
-      // Call API
-      const response = await fetch('/api/check-batch', {
+      // Route to correct API based on selected service
+      const apiEndpoint = fileItem.service === 'subscriberverify' 
+        ? '/api/check-batch-sv' 
+        : '/api/check-batch';
+  
+      const response = await fetch(apiEndpoint, {
         method: 'POST',
-        body: formData, // Send as FormData instead of JSON
+        body: formData,
       });
   
       const data = await response.json();
@@ -84,16 +86,19 @@ export default function Home() {
   
       updateFileStatus(fileItem.id, {
         status: 'completed',
+        service: data.service || fileItem.service,
         validationResults: data.validation,
-        validNumbers: data.validation.valid,
-        processedCount: data.results.length,
+        validNumbers: data.validation?.valid || data.total_processed,
+        processedCount: data.total_processed,
         results: data.results,
         batchId: batchId,
         originalFileUrl: data.original_file_url,
-        resultsFileUrl: data.results_file_url
+        resultsFileUrl: data.results_file_url,
+        subscriberVerifyStats: data.subscriber_verify_stats,
+        cacheHits: data.cache_hits,
+        apiCalls: data.api_calls
       });
   
-      // Refresh file history
       if (typeof FileHistory.refresh === 'function') {
         FileHistory.refresh();
       }

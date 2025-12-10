@@ -93,16 +93,47 @@ function FileProcessingItem({ file }) {
         </div>
       )}
 
-{file.status === 'completed' && file.resultsFileUrl && (
-  <div style={styles.downloadLinks}>
-    <a href={file.resultsFileUrl} download style={styles.downloadLink}>
-      ⬇️ Download Results
-    </a>
-    {file.originalFileUrl && (
-      <a href={file.originalFileUrl} download style={styles.downloadLink}>
-        📄 Download Original
-      </a>
-    )}
+{file.status === 'completed' && file.results && (
+  <div style={styles.completionInfo}>
+    <div style={styles.serviceUsed}>
+      Service: {file.service === 'subscriberverify' ? '✅ SubscriberVerify' : '📱 Blooio'}
+    </div>
+    <div style={styles.completionStats}>
+      <span style={styles.completionStat}>
+        📊 {file.results.length} checked
+      </span>
+      
+      {file.service === 'blooio' && (
+        <>
+          <span style={styles.completionStat}>
+            📱 {file.results.filter(r => r.is_ios).length} iOS
+          </span>
+          <span style={styles.completionStat}>
+            💾 {file.cacheHits || 0} cached
+          </span>
+        </>
+      )}
+      
+      {file.service === 'subscriberverify' && file.subscriberVerifyStats && (
+        <>
+          <span style={styles.completionStat}>
+            ✅ {file.subscriberVerifyStats.send} sendable
+          </span>
+          <span style={styles.completionStat}>
+            ⚠️ {file.subscriberVerifyStats.unsubscribe} invalid
+          </span>
+          <span style={styles.completionStat}>
+            🚫 {file.subscriberVerifyStats.blacklist} blacklisted
+          </span>
+        </>
+      )}
+      
+      {file.results.filter(r => r.error).length > 0 && (
+        <span style={styles.completionStat}>
+          ⚠️ {file.results.filter(r => r.error).length} errors
+        </span>
+      )}
+    </div>
   </div>
 )}
     </div>
@@ -261,5 +292,11 @@ const styles = {
     fontWeight: '600',
     textDecoration: 'none',
     display: 'inline-block',
+  },
+  serviceUsed: {
+    fontSize: '13px',
+    fontWeight: '600',
+    color: '#155724',
+    marginBottom: '8px',
   },
 };
