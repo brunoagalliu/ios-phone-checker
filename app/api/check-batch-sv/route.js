@@ -138,13 +138,13 @@ export async function POST(request) {
     console.log(`File results URL updated in database`);
     
     await updateFileStatus(fileId, 'completed', {
-      valid_numbers: validationResult.stats.valid,
-      invalid_numbers: validationResult.stats.invalid,
-      duplicate_numbers: validationResult.stats.duplicates,
-      sv_send_count: categorized.send.length,
-      sv_unsubscribe_count: categorized.unsubscribe.length,
-      sv_blacklist_count: categorized.blacklist.length
-    });
+        valid_numbers: validationResult.stats.valid || 0,
+        invalid_numbers: validationResult.stats.invalid || 0,
+        duplicate_numbers: validationResult.stats.duplicates || 0,
+        sv_send_count: categorized.send?.length || 0,
+        sv_unsubscribe_count: categorized.unsubscribe?.length || 0,
+        sv_blacklist_count: categorized.blacklist?.length || 0
+      });
     
     console.log(`File status updated to completed`);
     
