@@ -8,12 +8,12 @@ import {
 } from '../../../lib/db.js';
 import { processPhoneArray } from '../../../lib/phoneValidator.js';
 import blooioRateLimiter from '../../../lib/rateLimiter.js';
-import { uploadFile, uploadResultsAsCSV } from '../../../lib/blobStorage.js';
-import { checkBulkInBatches, categorizeBulkResults } from '../../../lib/subscriberVerify.js';
+import { uploadFile } from '../../../lib/blobStorage.js';
+import Papa from 'papaparse';
 
 const BLOOIO_API_URL = 'https://backend.blooio.com/v1/api/contacts';
 
-async function checkSingleNumberWithCache(phoneNumber, batchId, fileId, subscriberVerifyData = null) {
+async function checkSingleNumberWithCache(phoneNumber, batchId, fileId) {
   const formattedPhone = `+${phoneNumber}`;
   
   // Check cache first
@@ -34,8 +34,7 @@ async function checkSingleNumberWithCache(phoneNumber, batchId, fileId, subscrib
         last_checked: cachedResult.last_checked,
         check_count: cachedResult.check_count,
         source: 'cache',
-        batch_id: batchId,
-        sv_data: subscriberVerifyData
+        batch_id: batchId
       };
     }
   } catch (cacheError) {
@@ -53,8 +52,7 @@ async function checkSingleNumberWithCache(phoneNumber, batchId, fileId, subscrib
       supports_imessage: false,
       supports_sms: false,
       from_cache: false,
-      source: 'config_error',
-      sv_data: subscriberVerifyData
+      source: 'config_error'
     };
   }
   
@@ -101,8 +99,7 @@ async function checkSingleNumberWithCache(phoneNumber, batchId, fileId, subscrib
           supports_imessage: false,
           supports_sms: false,
           from_cache: false,
-          source: 'api_error',
-          sv_data: subscriberVerifyData
+          source: 'api_error'
         };
       }
       
@@ -122,8 +119,7 @@ async function checkSingleNumberWithCache(phoneNumber, batchId, fileId, subscrib
         error: null,
         from_cache: false,
         source: 'api',
-        batch_id: batchId,
-        sv_data: subscriberVerifyData
+        batch_id: batchId
       };
     });
     
@@ -147,8 +143,7 @@ async function checkSingleNumberWithCache(phoneNumber, batchId, fileId, subscrib
       supports_imessage: false,
       supports_sms: false,
       from_cache: false,
-      source: 'network_error',
-      sv_data: subscriberVerifyData
+      source: 'network_error'
     };
   }
 }
@@ -159,7 +154,6 @@ export async function POST(request) {
     const file = formData.get('file');
     const batchId = formData.get('batchId');
     const fileName = formData.get('fileName');
-    const useSubscriberVerify = formData.get('useSubscriberVerify') === 'true';
     
     if (!file) {
       return NextResponse.json(
@@ -168,15 +162,16 @@ export async function POST(request) {
       );
     }
     
-    console.log(`Starting batch: ${fileName}, batch ID: ${batchId}, SV: ${useSubscriberVerify}`);
+    console.log(`Starting Blooio batch: ${fileName}, batch ID: ${batchId}`);
     
     // Upload original file to Vercel Blob
     const fileBuffer = Buffer.from(await file.arrayBuffer());
     const originalFileBlob = await uploadFile(fileBuffer, fileName, 'originals');
     
+    console.log(`Original file uploaded to: ${originalFileBlob.url}`);
+    
     // Parse CSV
     const fileText = await file.text();
-    const Papa = require('papaparse');
     const parseResult = Papa.parse(fileText, {
       header: true,
       skipEmptyLines: true
@@ -206,12 +201,12 @@ export async function POST(request) {
       );
     }
     
-    // Validate and format
+    // Validate and format US phone numbers
     const validationResult = processPhoneArray(phones);
     
-    console.log(`Validation: ${validationResult.stats.valid} valid US numbers`);
+    console.log(`Validation complete: ${validationResult.stats.valid} valid, ${validationResult.stats.invalid} invalid, ${validationResult.stats.duplicates} duplicates`);
     
-    // Save file metadata
+    // Save file metadata to database
     const fileId = await saveUploadedFile({
       file_name: fileName,
       original_name: fileName,
@@ -229,80 +224,32 @@ export async function POST(request) {
     const results = [];
     let cacheHits = 0;
     let apiCalls = 0;
-    let svFiltered = 0;
     const startTime = Date.now();
     
-    let phonesToCheck = validationResult.valid;
-    let svResults = null;
-    
-    // STAGE 1: SubscriberVerify bulk check (if enabled)
-    if (useSubscriberVerify) {
-      console.log('STAGE 1: SubscriberVerify bulk validation...');
+    // Process only valid phone numbers with Blooio
+    for (let i = 0; i < validationResult.valid.length; i++) {
+      const validPhone = validationResult.valid[i];
       
-      const svPhones = validationResult.valid.map(v => v.formatted.replace('+', ''));
-      
-      try {
-        const svBulkResults = await checkBulkInBatches(svPhones);
-        const categorized = categorizeBulkResults(svBulkResults);
-        
-        console.log(`SubscriberVerify results: ${categorized.send.length} sendable, ${categorized.unsubscribe.length} invalid, ${categorized.blacklist.length} blacklisted`);
-        
-        // Only check iOS for "send" category (valid mobile numbers)
-        phonesToCheck = categorized.send.map(cat => validationResult.valid[cat.index]);
-        svFiltered = validationResult.valid.length - phonesToCheck.length;
-        
-        // Store SV results
-        svResults = svBulkResults;
-        
-        // Add non-sendable numbers to results immediately
-        [...categorized.unsubscribe, ...categorized.blacklist, ...categorized.error].forEach(cat => {
-          const validPhone = validationResult.valid[cat.index];
-          results.push({
-            phone_number: `+${validPhone.formatted}`,
-            original_number: validPhone.original,
-            formatted_number: validPhone.formatted,
-            display_number: validPhone.display,
-            is_ios: false,
-            supports_imessage: false,
-            supports_sms: false,
-            error: cat.reason || `SubscriberVerify: ${cat.action}`,
-            from_cache: false,
-            source: 'subscriber_verify_filtered',
-            sv_data: cat
-          });
-        });
-        
-      } catch (svError) {
-        console.error('SubscriberVerify error:', svError);
-        // Continue without SV filtering
-      }
-    }
-    
-    // STAGE 2: iOS detection via Blooio (only for valid mobile numbers)
-    console.log(`STAGE 2: Checking ${phonesToCheck.length} numbers for iOS...`);
-    
-    for (let i = 0; i < phonesToCheck.length; i++) {
-      const validPhone = phonesToCheck[i];
-      const originalIndex = validationResult.valid.findIndex(v => v.formatted === validPhone.formatted);
-      const svData = svResults ? svResults[originalIndex] : null;
-      
+      // Check with cache and Blooio API (rate limited)
       const result = await checkSingleNumberWithCache(
-        validPhone.formatted,
-        batchId,
-        fileId,
-        svData
+        validPhone.formatted, 
+        batchId, 
+        fileId
       );
       
+      // Track statistics
       if (result.from_cache) {
         cacheHits++;
       } else if (result.source === 'api') {
         apiCalls++;
       }
       
+      // Add original and formatted info
       result.original_number = validPhone.original;
       result.formatted_number = validPhone.formatted;
       result.display_number = validPhone.display;
       
+      // Save to database
       try {
         await savePhoneCheckWithFile(result, fileId);
       } catch (dbError) {
@@ -313,14 +260,39 @@ export async function POST(request) {
       results.push(result);
       
       const status = result.from_cache ? 'CACHE' : result.error ? 'ERROR' : 'API';
-      console.log(`[${i + 1}/${phonesToCheck.length}] ${validPhone.formatted} - ${status}`);
+      const progress = `[${i + 1}/${validationResult.valid.length}]`;
+      console.log(`${progress} ${validPhone.formatted} - ${status}`);
+      
+      // Log rate limiter stats every 10 requests
+      if ((i + 1) % 10 === 0) {
+        const stats = blooioRateLimiter.getStats();
+        console.log(`Rate limiter: ${stats.timeSinceLastRequest}ms since last request`);
+      }
     }
     
-    // Upload results CSV
-    const resultsFileName = `${fileName.replace('.csv', '')}_results_${Date.now()}.csv`;
-    const resultsBlob = await uploadResultsAsCSV(results, resultsFileName);
+    // Upload results CSV to Blob Storage
+    const csv = Papa.unparse(results.map(r => ({
+      original_number: r.original_number || r.phone_number,
+      formatted_number: r.formatted_number || r.phone_number,
+      display_number: r.display_number || r.phone_number,
+      is_ios: r.is_ios ? 'YES' : 'NO',
+      supports_imessage: r.supports_imessage ? 'YES' : 'NO',
+      supports_sms: r.supports_sms ? 'YES' : 'NO',
+      from_cache: r.from_cache ? 'YES' : 'NO',
+      cache_age_days: r.cache_age_days || 'N/A',
+      error: r.error || 'None',
+      checked_at: new Date().toISOString()
+    })));
     
+    const resultsFileName = `${fileName.replace('.csv', '')}_blooio_results_${Date.now()}.csv`;
+    const resultsBlob = await uploadFile(Buffer.from(csv), resultsFileName, 'results');
+    
+    console.log(`Results uploaded to: ${resultsBlob.url}`);
+    
+    // Update file with results URL
     await updateFileResultsURL(fileId, resultsBlob.url, resultsBlob.size);
+    
+    // Update file status to completed
     await updateFileStatus(fileId, 'completed', {
       valid_numbers: validationResult.stats.valid,
       invalid_numbers: validationResult.stats.invalid,
@@ -328,30 +300,38 @@ export async function POST(request) {
     });
     
     const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
+    const avgTimePerRequest = validationResult.valid.length > 0 
+      ? ((Date.now() - startTime) / validationResult.valid.length / 1000).toFixed(2)
+      : 0;
     
-    console.log(`Batch complete: ${totalTime}s, ${svFiltered} filtered by SV, ${apiCalls} Blooio API calls`);
+    console.log(`Blooio batch complete: ${cacheHits} from cache, ${apiCalls} API calls, ${totalTime}s total, ${avgTimePerRequest}s avg per request`);
     
     return NextResponse.json({
       success: true,
+      service: 'blooio',
       batch_id: batchId,
       file_id: fileId,
       original_file_url: originalFileBlob.url,
       results_file_url: resultsBlob.url,
       validation: validationResult.stats,
-      subscriber_verify_filtered: svFiltered,
       invalid_numbers: validationResult.invalid,
       total_processed: results.length,
       cache_hits: cacheHits,
       api_calls: apiCalls,
       total_success: results.filter(r => !r.error).length,
       total_errors: results.filter(r => r.error).length,
-      api_calls_saved: cacheHits + svFiltered,
+      api_calls_saved: cacheHits,
       processing_time_seconds: parseFloat(totalTime),
+      avg_time_per_request: parseFloat(avgTimePerRequest),
+      rate_limit_info: {
+        requests_per_second: 4,
+        time_between_requests_ms: 250
+      },
       results: results
     });
     
   } catch (error) {
-    console.error('Batch check error:', error);
+    console.error('Blooio batch check error:', error);
     return NextResponse.json(
       { error: error.message || 'Internal server error' },
       { status: 500 }
