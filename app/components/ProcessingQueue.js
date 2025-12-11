@@ -34,6 +34,22 @@ function FileProcessingItem({ file }) {
     }
   };
 
+  const handleDownload = (url, filename) => {
+    if (!url) {
+      alert('Download URL not available');
+      return;
+    }
+    
+    // Create a temporary link and trigger download
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.target = '_blank';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
   return (
     <div style={styles.fileItem}>
       <div style={styles.fileHeader}>
@@ -93,49 +109,69 @@ function FileProcessingItem({ file }) {
         </div>
       )}
 
-{file.status === 'completed' && file.results && (
-  <div style={styles.completionInfo}>
-    <div style={styles.serviceUsed}>
-      Service: {file.service === 'subscriberverify' ? '✅ SubscriberVerify' : '📱 Blooio'}
-    </div>
-    <div style={styles.completionStats}>
-      <span style={styles.completionStat}>
-        📊 {file.results.length} checked
-      </span>
-      
-      {file.service === 'blooio' && (
-        <>
-          <span style={styles.completionStat}>
-            📱 {file.results.filter(r => r.is_ios).length} iOS
-          </span>
-          <span style={styles.completionStat}>
-            💾 {file.cacheHits || 0} cached
-          </span>
-        </>
+      {file.status === 'completed' && file.results && (
+        <div style={styles.completionInfo}>
+          <div style={styles.serviceUsed}>
+            Service: {file.service === 'subscriberverify' ? '✅ SubscriberVerify' : '📱 Blooio'}
+          </div>
+          <div style={styles.completionStats}>
+            <span style={styles.completionStat}>
+              📊 {file.results.length} checked
+            </span>
+            
+            {file.service === 'blooio' && (
+              <>
+                <span style={styles.completionStat}>
+                  📱 {file.results.filter(r => r.is_ios).length} iOS
+                </span>
+                <span style={styles.completionStat}>
+                  💾 {file.cacheHits || 0} cached
+                </span>
+              </>
+            )}
+            
+            {file.service === 'subscriberverify' && file.subscriberVerifyStats && (
+              <>
+                <span style={styles.completionStat}>
+                  ✅ {file.subscriberVerifyStats.send} sendable
+                </span>
+                <span style={styles.completionStat}>
+                  ⚠️ {file.subscriberVerifyStats.unsubscribe} invalid
+                </span>
+                <span style={styles.completionStat}>
+                  🚫 {file.subscriberVerifyStats.blacklist} blacklisted
+                </span>
+              </>
+            )}
+            
+            {file.results.filter(r => r.error).length > 0 && (
+              <span style={styles.completionStat}>
+                ⚠️ {file.results.filter(r => r.error).length} errors
+              </span>
+            )}
+          </div>
+
+          {/* Download Buttons */}
+          <div style={styles.downloadButtons}>
+            {file.resultsFileUrl && (
+              <button
+                onClick={() => handleDownload(file.resultsFileUrl, `${file.name.replace('.csv', '')}_results.csv`)}
+                style={styles.downloadButton}
+              >
+                ⬇️ Download Results
+              </button>
+            )}
+            {file.originalFileUrl && (
+              <button
+                onClick={() => handleDownload(file.originalFileUrl, file.name)}
+                style={styles.downloadButtonSecondary}
+              >
+                📄 Download Original
+              </button>
+            )}
+          </div>
+        </div>
       )}
-      
-      {file.service === 'subscriberverify' && file.subscriberVerifyStats && (
-        <>
-          <span style={styles.completionStat}>
-            ✅ {file.subscriberVerifyStats.send} sendable
-          </span>
-          <span style={styles.completionStat}>
-            ⚠️ {file.subscriberVerifyStats.unsubscribe} invalid
-          </span>
-          <span style={styles.completionStat}>
-            🚫 {file.subscriberVerifyStats.blacklist} blacklisted
-          </span>
-        </>
-      )}
-      
-      {file.results.filter(r => r.error).length > 0 && (
-        <span style={styles.completionStat}>
-          ⚠️ {file.results.filter(r => r.error).length} errors
-        </span>
-      )}
-    </div>
-  </div>
-)}
     </div>
   );
 }
@@ -268,35 +304,48 @@ const styles = {
     background: '#d4edda',
     borderRadius: '4px',
   },
+  serviceUsed: {
+    fontSize: '13px',
+    fontWeight: '600',
+    color: '#155724',
+    marginBottom: '8px',
+  },
   completionStats: {
     display: 'flex',
     gap: '12px',
     flexWrap: 'wrap',
     fontSize: '12px',
     color: '#155724',
+    marginBottom: '10px',
   },
   completionStat: {
     fontWeight: '500',
   },
-  downloadLinks: {
+  downloadButtons: {
     display: 'flex',
     gap: '10px',
     marginTop: '10px',
   },
-  downloadLink: {
-    padding: '6px 12px',
+  downloadButton: {
+    padding: '8px 16px',
     background: '#28a745',
     color: 'white',
-    borderRadius: '5px',
-    fontSize: '12px',
-    fontWeight: '600',
-    textDecoration: 'none',
-    display: 'inline-block',
-  },
-  serviceUsed: {
+    border: 'none',
+    borderRadius: '6px',
     fontSize: '13px',
     fontWeight: '600',
-    color: '#155724',
-    marginBottom: '8px',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
+  },
+  downloadButtonSecondary: {
+    padding: '8px 16px',
+    background: '#6c757d',
+    color: 'white',
+    border: 'none',
+    borderRadius: '6px',
+    fontSize: '13px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
   },
 };

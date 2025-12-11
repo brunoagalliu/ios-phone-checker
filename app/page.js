@@ -83,6 +83,10 @@ export default function Home() {
       if (!response.ok) {
         throw new Error(data.error || 'Failed to process');
       }
+      // Debug logging
+console.log('API Response:', data);
+console.log('Results file URL:', data.results_file_url);
+console.log('Original file URL:', data.original_file_url);
   
       updateFileStatus(fileItem.id, {
         status: 'completed',
@@ -92,8 +96,8 @@ export default function Home() {
         processedCount: data.total_processed,
         results: data.results,
         batchId: batchId,
-        originalFileUrl: data.original_file_url,
-        resultsFileUrl: data.results_file_url,
+        originalFileUrl: data.original_file_url,  // Make sure this is set
+        resultsFileUrl: data.results_file_url,     // Make sure this is set
         subscriberVerifyStats: data.subscriber_verify_stats,
         cacheHits: data.cache_hits,
         apiCalls: data.api_calls
