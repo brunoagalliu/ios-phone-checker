@@ -7,6 +7,7 @@ import {
 import { processPhoneArray } from '../../../lib/phoneValidator.js';
 import { uploadFile } from '../../../lib/blobStorage.js';
 import { checkBulkInBatches, categorizeBulkResults } from '../../../lib/subscriberVerify.js';
+import { getSubscriberVerifyCache, saveSubscriberVerifyCache } from '../../../lib/phoneCache.js';
 import Papa from 'papaparse';
 
 export async function POST(request) {
@@ -106,31 +107,111 @@ export async function POST(request) {
     
     // Convert to 10-digit format for SubscriberVerify (remove +1 prefix)
     const svPhones = validationResult.valid.map(v => {
-      // Remove +1 prefix if present
       return v.formatted.replace(/^\+?1/, '');
     });
     
     console.log(`Prepared ${svPhones.length} numbers for SubscriberVerify (10-digit format)`);
-    console.log(`Sample numbers:`, svPhones.slice(0, 3));
+    console.log(`Checking cache for all numbers...`);
     
-    // Bulk check with SubscriberVerify
-    console.log('Calling SubscriberVerify bulk API...');
-    const svBulkResults = await checkBulkInBatches(svPhones);
+    // STEP 1: Check cache for all numbers first
+    const cachedResults = [];
+    const uncachedPhones = [];
+    const uncachedIndices = [];
     
-    console.log(`SubscriberVerify returned ${svBulkResults.length} results`);
+    for (let i = 0; i < svPhones.length; i++) {
+      const formattedPhone = `+1${svPhones[i]}`;
+      const cached = await getSubscriberVerifyCache(formattedPhone);
+      
+      if (cached) {
+        cachedResults.push({ ...cached, index: i });
+      } else {
+        uncachedPhones.push(svPhones[i]);
+        uncachedIndices.push(i);
+      }
+    }
     
-    // Categorize results
-    const categorized = categorizeBulkResults(svBulkResults);
+    console.log(`Cache stats: ${cachedResults.length} cached, ${uncachedPhones.length} need API call`);
     
-    console.log(`SubscriberVerify categorized:`, {
+    // STEP 2: Only call API for uncached numbers
+    let svBulkResults = [];
+    
+    if (uncachedPhones.length > 0) {
+      console.log(`Checking ${uncachedPhones.length} numbers with SubscriberVerify bulk API...`);
+      svBulkResults = await checkBulkInBatches(uncachedPhones);
+      console.log(`SubscriberVerify returned ${svBulkResults.length} results`);
+      
+      // STEP 3: Save new results to cache (fire and forget)
+      for (let i = 0; i < svBulkResults.length; i++) {
+        const svResult = svBulkResults[i];
+        const originalIndex = uncachedIndices[i];
+        const validPhone = validationResult.valid[originalIndex];
+        
+        const cacheData = {
+          phone_number: validPhone.formatted,
+          action: svResult.action,
+          reason: svResult.reason,
+          deliverable: svResult.action === 'send',
+          carrier: svResult.dipCarrier || svResult.nanpCarrier,
+          carrier_type: svResult.dipCarrierType || svResult.nanpType,
+          is_mobile: (svResult.dipCarrierType === 'mobile' || svResult.nanpType === 'mobile'),
+          litigator: svResult.litigator,
+          blacklisted: svResult.blackList,
+          clicker: svResult.clicker,
+          geo_state: svResult.geoState,
+          geo_city: svResult.geoCity,
+          timezone: svResult.timezone
+        };
+        
+        saveSubscriberVerifyCache(cacheData).catch(err =>
+          console.error('Failed to save to cache:', err)
+        );
+      }
+    }
+    
+    // STEP 4: Merge cached and fresh results
+    const allResults = new Array(svPhones.length);
+    
+    // Fill in cached results
+    cachedResults.forEach(cached => {
+      allResults[cached.index] = {
+        subscriber: cached.phone_number.replace(/^\+1/, ''),
+        action: cached.action,
+        reason: cached.reason,
+        nanpType: cached.carrier_type,
+        nanpCarrier: cached.carrier,
+        dipCarrier: cached.carrier,
+        dipCarrierType: cached.carrier_type,
+        litigator: cached.litigator,
+        blackList: cached.blacklisted,
+        clicker: cached.clicker,
+        geoState: cached.geo_state,
+        geoCity: cached.geo_city,
+        timezone: cached.timezone,
+        from_cache: true
+      };
+    });
+    
+    // Fill in fresh API results
+    svBulkResults.forEach((result, i) => {
+      const originalIndex = uncachedIndices[i];
+      allResults[originalIndex] = {
+        ...result,
+        from_cache: false
+      };
+    });
+    
+    const categorized = categorizeBulkResults(allResults);
+    
+    console.log(`Results categorized:`, {
       send: categorized.send.length,
       unsubscribe: categorized.unsubscribe.length,
       blacklist: categorized.blacklist.length,
-      error: categorized.error.length
+      error: categorized.error.length,
+      cached: cachedResults.length
     });
     
-    // Format results for CSV
-    const results = svBulkResults.map((svResult, index) => {
+    // STEP 5: Format results for CSV
+    const results = allResults.map((svResult, index) => {
       const validPhone = validationResult.valid[index];
       
       return {
@@ -145,9 +226,11 @@ export async function POST(request) {
         is_mobile: (svResult?.dipCarrierType === 'mobile' || svResult?.nanpType === 'mobile'),
         litigator: svResult?.litigator || false,
         blacklisted: svResult?.blackList || false,
+        clicker: svResult?.clicker || false,
         geo_state: svResult?.geoState || '',
         geo_city: svResult?.geoCity || '',
         timezone: svResult?.timezone || '',
+        from_cache: svResult?.from_cache ? 'YES' : 'NO',
         checked_at: new Date().toISOString()
       };
     });
@@ -191,7 +274,7 @@ export async function POST(request) {
     
     const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
     
-    console.log(`SubscriberVerify batch complete: ${totalTime}s total`);
+    console.log(`SubscriberVerify batch complete: ${totalTime}s total, ${cachedResults.length} from cache, ${uncachedPhones.length} API calls`);
     
     return NextResponse.json({
       success: true,
@@ -207,6 +290,9 @@ export async function POST(request) {
         blacklist: categorized.blacklist?.length || 0,
         error: categorized.error?.length || 0
       },
+      cache_hits: cachedResults.length,
+      api_calls: uncachedPhones.length,
+      api_calls_saved: cachedResults.length,
       total_processed: results.length,
       processing_time_seconds: parseFloat(totalTime),
       results: results

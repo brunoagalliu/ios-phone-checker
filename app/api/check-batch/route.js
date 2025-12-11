@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
 import { 
   savePhoneCheckWithFile, 
-  getCachedPhoneCheck, 
   saveUploadedFile, 
   updateFileStatus,
   updateFileResultsURL
@@ -9,6 +8,7 @@ import {
 import { processPhoneArray } from '../../../lib/phoneValidator.js';
 import blooioRateLimiter from '../../../lib/rateLimiter.js';
 import { uploadFile } from '../../../lib/blobStorage.js';
+import { getBlooioCache, saveBlooioCache } from '../../../lib/phoneCache.js';
 import Papa from 'papaparse';
 
 const BLOOIO_API_URL = 'https://backend.blooio.com/v1/api/contacts';
@@ -16,26 +16,13 @@ const BLOOIO_API_URL = 'https://backend.blooio.com/v1/api/contacts';
 async function checkSingleNumberWithCache(phoneNumber, batchId, fileId) {
   const formattedPhone = `+${phoneNumber}`;
   
-  // Check cache first
+  // Check unified cache first
   try {
-    const cachedResult = await getCachedPhoneCheck(formattedPhone);
+    const cachedResult = await getBlooioCache(formattedPhone);
     
     if (cachedResult) {
-      return {
-        phone_number: formattedPhone,
-        is_ios: cachedResult.is_ios,
-        supports_imessage: cachedResult.supports_imessage,
-        supports_sms: cachedResult.supports_sms,
-        contact_type: cachedResult.contact_type,
-        contact_id: cachedResult.contact_id,
-        error: cachedResult.error,
-        from_cache: true,
-        cache_age_days: cachedResult.cache_age_days,
-        last_checked: cachedResult.last_checked,
-        check_count: cachedResult.check_count,
-        source: 'cache',
-        batch_id: batchId
-      };
+      cachedResult.batch_id = batchId;
+      return cachedResult;
     }
   } catch (cacheError) {
     console.error(`Cache check error for ${formattedPhone}:`, cacheError);
@@ -108,7 +95,7 @@ async function checkSingleNumberWithCache(phoneNumber, batchId, fileId) {
       const supportsIMessage = capabilities.imessage === true || capabilities.iMessage === true;
       const supportsSMS = capabilities.sms === true || capabilities.SMS === true;
       
-      return {
+      const resultData = {
         phone_number: formattedPhone,
         contact_id: data.contact,
         contact_type: data.contact_type,
@@ -121,6 +108,13 @@ async function checkSingleNumberWithCache(phoneNumber, batchId, fileId) {
         source: 'api',
         batch_id: batchId
       };
+      
+      // Save to unified cache (fire and forget)
+      saveBlooioCache(resultData).catch(err => 
+        console.error('Failed to save to cache:', err)
+      );
+      
+      return resultData;
     });
     
     return result;
