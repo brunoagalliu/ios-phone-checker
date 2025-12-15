@@ -1,6 +1,36 @@
 'use client';
 
 import { useState } from 'react';
+const [reinitializing, setReinitializing] = useState(false);
+
+const reinitializeFile = async () => {
+    if (!confirm('This will reinitialize the file for chunked processing. Continue?')) {
+      return;
+    }
+  
+    setReinitializing(true);
+  
+    try {
+      const response = await fetch('/api/reinit-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileId: parseInt(fileId) })
+      });
+  
+      const data = await response.json();
+  
+      if (data.success) {
+        alert(`✅ File reinitialized!\n\nService: ${data.service}\nTotal Records: ${data.totalRecords.toLocaleString()}\nChunk Size: ${data.chunkSize}\nEstimated Chunks: ${data.estimatedChunks}\n\nYou can now use chunked processing.`);
+        checkProgress(); // Refresh
+      } else {
+        alert('❌ Error: ' + data.error);
+      }
+    } catch (err) {
+      alert('❌ Failed to reinitialize: ' + err.message);
+    } finally {
+      setReinitializing(false);
+    }
+  };
 
 export default function FileProgressChecker() {
   const [fileId, setFileId] = useState('');
@@ -194,6 +224,20 @@ export default function FileProgressChecker() {
               </p>
             </div>
           )}
+          {progress && !progress.can_resume && (
+  <div style={styles.actionSection}>
+    <button 
+      onClick={reinitializeFile}
+      disabled={reinitializing}
+      style={styles.reinitButton}
+    >
+      {reinitializing ? '⏳ Reinitializing...' : '🔄 Reinitialize for Chunked Processing'}
+    </button>
+    <p style={styles.hint}>
+      💡 This file wasn't set up for chunked processing. Click to reinitialize it.
+    </p>
+  </div>
+)}
 
           {progress.processing_status === 'initialized' && (
             <div style={styles.actionSection}>
@@ -422,5 +466,16 @@ const styles = {
     fontSize: '13px',
     color: '#333',
     fontWeight: '600',
+  },
+  reinitButton: {
+    padding: '12px 24px',
+    background: '#ffc107',
+    color: '#333',
+    border: 'none',
+    borderRadius: '8px',
+    fontSize: '14px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    marginBottom: '10px',
   },
 };
