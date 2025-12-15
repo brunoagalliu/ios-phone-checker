@@ -6,6 +6,7 @@ import ProcessingQueue from './components/ProcessingQueue';
 import FileHistory from './components/FileHistory';
 import Instructions from './components/Instructions';
 import ChunkedProcessor from './components/ChunkedProcessor';
+import FileProgressChecker from './components/FileProgressChecker';
 
 export default function Home() {
   const [processingFiles, setProcessingFiles] = useState([]);
@@ -251,6 +252,7 @@ export default function Home() {
             )}
           </>
         )}
+        <FileProgressChecker />
 
         {/* File history - always visible */}
         <FileHistory />
