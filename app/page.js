@@ -1,93 +1,119 @@
 'use client';
 
 import { useState } from 'react';
-import Papa from 'papaparse';
 import FileUploader from './components/FileUploader';
 import ProcessingQueue from './components/ProcessingQueue';
 import FileHistory from './components/FileHistory';
 import Instructions from './components/Instructions';
+import ChunkedProcessor from './components/ChunkedProcessor';
 
 export default function Home() {
   const [processingFiles, setProcessingFiles] = useState([]);
   const [error, setError] = useState(null);
+  const [chunkedProcessing, setChunkedProcessing] = useState(null);
 
   const handleFilesSelected = async (files, service) => {
     setError(null);
-    
-    const newFiles = files.map(file => ({
-      id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      name: file.name,
-      file: file,
-      service: service, // 'blooio' or 'subscriberverify'
-      status: 'queued',
-      totalNumbers: 0,
-      validNumbers: 0,
-      processedCount: 0,
-      validationResults: null,
-      results: null,
-      error: null,
-    }));
-  
-    setProcessingFiles(prev => [...prev, ...newFiles]);
-  
-    for (const fileItem of newFiles) {
-      await processFile(fileItem);
-    }
-  };
 
-  const updateFileStatus = (fileId, updates) => {
-    setProcessingFiles(prev =>
-      prev.map(f => f.id === fileId ? { ...f, ...updates } : f)
-    );
-  };
+    for (const file of files) {
+      // Check if file is large (> 10MB or needs chunked processing)
+      const isLargeFile = file.size > 10 * 1024 * 1024; // 10MB threshold
 
-  const findPhoneColumn = (data) => {
-    if (data.length === 0) return null;
-    
-    const firstRow = data[0];
-    const possibleColumns = ['phone', 'phone_number', 'phonenumber', 'mobile', 'number', 'cell', 'telephone'];
-    
-    for (const col of Object.keys(firstRow)) {
-      const lowerCol = col.toLowerCase().trim();
-      if (possibleColumns.includes(lowerCol)) {
-        return col;
+      if (isLargeFile && service === 'subscriberverify') {
+        console.log(`Large file detected: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
+        
+        try {
+          // Initialize for chunked processing
+          const formData = new FormData();
+          formData.append('file', file);
+          formData.append('fileName', file.name);
+          formData.append('service', service);
+
+          const response = await fetch('/api/init-large-file', {
+            method: 'POST',
+            body: formData
+          });
+
+          if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || 'Failed to initialize file');
+          }
+
+          const data = await response.json();
+
+          if (data.success) {
+            setChunkedProcessing({
+              fileId: data.fileId,
+              totalRecords: data.totalRecords,
+              fileName: file.name,
+              chunkSize: data.chunkSize,
+              estimatedChunks: data.estimatedChunks,
+              estimatedTime: data.estimatedTime
+            });
+          }
+        } catch (err) {
+          console.error('Failed to initialize large file:', err);
+          setError(`Failed to initialize ${file.name}: ${err.message}`);
+        }
+
+        continue; // Skip normal processing for this file
       }
+
+      // Regular processing for small files
+      const newFile = {
+        id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        name: file.name,
+        file: file,
+        service: service,
+        status: 'queued',
+        totalNumbers: 0,
+        validNumbers: 0,
+        processedCount: 0,
+        validationResults: null,
+        results: null,
+        error: null,
+      };
+
+      setProcessingFiles(prev => [...prev, newFile]);
+
+      // Process immediately
+      await processFile(newFile);
     }
-    
-    return Object.keys(firstRow)[0];
   };
 
   const processFile = async (fileItem) => {
     try {
       updateFileStatus(fileItem.id, { status: 'processing' });
-  
+
       const batchId = `batch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  
+
       const formData = new FormData();
       formData.append('file', fileItem.file);
       formData.append('batchId', batchId);
       formData.append('fileName', fileItem.name);
-  
+
       // Route to correct API based on selected service
-      const apiEndpoint = fileItem.service === 'subscriberverify' 
-        ? '/api/check-batch-sv' 
+      const apiEndpoint = fileItem.service === 'subscriberverify'
+        ? '/api/check-batch-sv'
         : '/api/check-batch';
-  
+
+      console.log(`Processing ${fileItem.name} with ${fileItem.service} service...`);
+
       const response = await fetch(apiEndpoint, {
         method: 'POST',
         body: formData,
       });
-  
+
       const data = await response.json();
-  
+
+      console.log('API Response:', data);
+      console.log('Results file URL:', data.results_file_url);
+      console.log('Original file URL:', data.original_file_url);
+
       if (!response.ok) {
         throw new Error(data.error || 'Failed to process');
       }
-      // Debug logging
-console.log('API Response:', data);
-console.log('Results file URL:', data.results_file_url);
-console.log('Original file URL:', data.original_file_url);
-  
+
       updateFileStatus(fileItem.id, {
         status: 'completed',
         service: data.service || fileItem.service,
@@ -96,17 +122,19 @@ console.log('Original file URL:', data.original_file_url);
         processedCount: data.total_processed,
         results: data.results,
         batchId: batchId,
-        originalFileUrl: data.original_file_url,  // Make sure this is set
-        resultsFileUrl: data.results_file_url,     // Make sure this is set
+        originalFileUrl: data.original_file_url,
+        resultsFileUrl: data.results_file_url,
         subscriberVerifyStats: data.subscriber_verify_stats,
         cacheHits: data.cache_hits,
         apiCalls: data.api_calls
       });
-  
+
+      // Refresh file history
       if (typeof FileHistory.refresh === 'function') {
         FileHistory.refresh();
       }
     } catch (err) {
+      console.error('Processing error:', err);
       updateFileStatus(fileItem.id, {
         status: 'error',
         error: err.message
@@ -114,174 +142,232 @@ console.log('Original file URL:', data.original_file_url);
     }
   };
 
-  const downloadFileResults = (fileItem) => {
-    if (!fileItem.results) return;
-
-    const csv = Papa.unparse(fileItem.results.map(r => ({
-      original_number: r.original_number || r.phone_number,
-      formatted_number: r.formatted_number || r.phone_number,
-      is_ios: r.is_ios ? 'YES' : 'NO',
-      supports_imessage: r.supports_imessage ? 'YES' : 'NO',
-      supports_sms: r.supports_sms ? 'YES' : 'NO',
-      from_cache: r.from_cache ? 'YES' : 'NO',
-      error: r.error || 'None',
-      checked_at: new Date().toISOString()
-    })));
-
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${fileItem.name.replace('.csv', '')}_results_${Date.now()}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    window.URL.revokeObjectURL(url);
+  const updateFileStatus = (fileId, updates) => {
+    setProcessingFiles(prev =>
+      prev.map(file =>
+        file.id === fileId ? { ...file, ...updates } : file
+      )
+    );
   };
 
-  const clearCompleted = () => {
-    setProcessingFiles(prev => prev.filter(f => f.status !== 'completed'));
+  const handleChunkedComplete = (data) => {
+    console.log('Chunked processing complete:', data);
+    alert(`Processing complete! ${data.processed.toLocaleString()} records processed.\n\nCheck File History to download results.`);
+    
+    setChunkedProcessing(null);
+    
+    // Refresh file history to show the completed file
+    if (typeof FileHistory.refresh === 'function') {
+      FileHistory.refresh();
+    }
   };
 
-  const downloadAllResults = () => {
-    processingFiles
-      .filter(f => f.status === 'completed' && f.results)
-      .forEach(f => downloadFileResults(f));
+  const handleChunkedCancel = () => {
+    if (confirm('Are you sure you want to cancel? Progress will be saved and you can resume later.')) {
+      setChunkedProcessing(null);
+    }
   };
-
-  const hasCompletedFiles = processingFiles.some(f => f.status === 'completed');
-  const isProcessing = processingFiles.some(f => f.status === 'processing');
 
   return (
-    <div style={styles.body}>
+    <main style={styles.main}>
       <div style={styles.container}>
-        <h1 style={styles.h1}>📱 iOS Phone Number Batch Checker</h1>
-        <p style={styles.subtitle}>US numbers only • Validates • Deduplicates • Checks iOS</p>
-
-        <div style={styles.infoBox}>
-          <strong>✅ Smart Processing</strong>
-          <ul style={{ marginTop: '10px', paddingLeft: '20px', fontSize: '12px' }}>
-            <li>Upload multiple CSV files at once</li>
-            <li>Validates US phone numbers (proper area codes & format)</li>
-            <li>Auto-formats to: 1 + 10 digits (e.g., 18503631955)</li>
-            <li>Removes duplicates, blanks, and invalid numbers</li>
-            <li>Caches results for 6 months (saves API calls)</li>
-            <li>Real-time progress tracking for each file</li>
-          </ul>
-        </div>
-
-        <FileUploader 
-          onFilesSelected={handleFilesSelected}
-          disabled={isProcessing}
-        />
+        <header style={styles.header}>
+          <h1 style={styles.title}>📱 Phone Number Validator</h1>
+          <p style={styles.subtitle}>
+            Validate US phone numbers and check iOS/iMessage support
+          </p>
+        </header>
 
         {error && (
-          <div style={styles.errorBox}>
-            ❌ {error}
-          </div>
-        )}
-
-        {processingFiles.length > 0 && (
-          <ProcessingQueue files={processingFiles} />
-        )}
-
-        {hasCompletedFiles && (
-          <div style={styles.actionsBar}>
-            <button onClick={clearCompleted} style={styles.clearButton}>
-              🗑️ Clear Completed Files
-            </button>
+          <div style={styles.errorBanner}>
+            <span style={styles.errorIcon}>⚠️</span>
+            <span style={styles.errorText}>{error}</span>
             <button 
-              onClick={downloadAllResults}
-              style={styles.downloadAllButton}
+              onClick={() => setError(null)}
+              style={styles.errorClose}
             >
-              ⬇️ Download All Results
+              ✕
             </button>
           </div>
         )}
 
+        {/* Show chunked processor if large file is being processed */}
+        {chunkedProcessing ? (
+          <div style={styles.chunkedSection}>
+            <div style={styles.chunkedHeader}>
+              <h2 style={styles.chunkedTitle}>
+                🚀 Processing Large File: {chunkedProcessing.fileName}
+              </h2>
+              <button
+                onClick={handleChunkedCancel}
+                style={styles.cancelButton}
+              >
+                Cancel
+              </button>
+            </div>
+            
+            <div style={styles.chunkedInfo}>
+              <div style={styles.infoItem}>
+                <span style={styles.infoLabel}>Total Records:</span>
+                <span style={styles.infoValue}>{chunkedProcessing.totalRecords.toLocaleString()}</span>
+              </div>
+              <div style={styles.infoItem}>
+                <span style={styles.infoLabel}>Chunk Size:</span>
+                <span style={styles.infoValue}>{chunkedProcessing.chunkSize.toLocaleString()}</span>
+              </div>
+              <div style={styles.infoItem}>
+                <span style={styles.infoLabel}>Est. Chunks:</span>
+                <span style={styles.infoValue}>{chunkedProcessing.estimatedChunks}</span>
+              </div>
+              <div style={styles.infoItem}>
+                <span style={styles.infoLabel}>Est. Time:</span>
+                <span style={styles.infoValue}>{chunkedProcessing.estimatedTime}</span>
+              </div>
+            </div>
+
+            <ChunkedProcessor
+              fileId={chunkedProcessing.fileId}
+              totalRecords={chunkedProcessing.totalRecords}
+              onComplete={handleChunkedComplete}
+            />
+          </div>
+        ) : (
+          <>
+            {/* Normal file upload interface */}
+            <div style={styles.uploadSection}>
+              <FileUploader
+                onFilesSelected={handleFilesSelected}
+                disabled={processingFiles.some(f => f.status === 'processing')}
+              />
+              <Instructions />
+            </div>
+
+            {/* Processing queue for small files */}
+            {processingFiles.length > 0 && (
+              <ProcessingQueue files={processingFiles} />
+            )}
+          </>
+        )}
+
+        {/* File history - always visible */}
         <FileHistory />
-        <Instructions />
       </div>
-    </div>
+    </main>
   );
 }
 
 const styles = {
-  body: {
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif',
-    background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+  main: {
     minHeight: '100vh',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: '20px',
+    background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+    padding: '40px 20px',
   },
   container: {
+    maxWidth: '1000px',
+    margin: '0 auto',
     background: 'white',
     borderRadius: '20px',
-    boxShadow: '0 20px 60px rgba(0, 0, 0, 0.3)',
-    maxWidth: '1000px',
-    width: '100%',
     padding: '40px',
-    maxHeight: '90vh',
-    overflowY: 'auto',
+    boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
   },
-  h1: {
-    color: '#333',
-    fontSize: '28px',
-    marginBottom: '10px',
+  header: {
     textAlign: 'center',
+    marginBottom: '40px',
+  },
+  title: {
+    fontSize: '36px',
+    fontWeight: '700',
+    color: '#333',
+    marginBottom: '10px',
+    background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+    WebkitBackgroundClip: 'text',
+    WebkitTextFillColor: 'transparent',
   },
   subtitle: {
+    fontSize: '16px',
     color: '#666',
-    textAlign: 'center',
-    marginBottom: '30px',
-    fontSize: '14px',
   },
-  infoBox: {
-    background: '#d4edda',
-    border: '1px solid #28a745',
-    borderRadius: '10px',
-    padding: '15px',
-    marginBottom: '20px',
-    fontSize: '13px',
-    color: '#155724',
-  },
-  errorBox: {
-    background: '#f8d7da',
-    border: '2px solid #dc3545',
-    borderRadius: '10px',
-    padding: '15px',
-    marginBottom: '20px',
-    color: '#721c24',
-  },
-  actionsBar: {
+  errorBanner: {
     display: 'flex',
-    gap: '10px',
+    alignItems: 'center',
+    gap: '12px',
+    padding: '15px 20px',
+    background: '#f8d7da',
+    border: '2px solid #f5c6cb',
+    borderRadius: '10px',
     marginBottom: '20px',
   },
-  clearButton: {
+  errorIcon: {
+    fontSize: '20px',
+  },
+  errorText: {
     flex: 1,
-    padding: '12px',
-    background: '#6c757d',
+    color: '#721c24',
+    fontSize: '14px',
+    fontWeight: '500',
+  },
+  errorClose: {
+    background: 'none',
+    border: 'none',
+    fontSize: '20px',
+    color: '#721c24',
+    cursor: 'pointer',
+    padding: '0 5px',
+  },
+  chunkedSection: {
+    marginBottom: '30px',
+  },
+  chunkedHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: '20px',
+    paddingBottom: '15px',
+    borderBottom: '2px solid #e0e0e0',
+  },
+  chunkedTitle: {
+    fontSize: '20px',
+    fontWeight: '600',
+    color: '#333',
+    margin: 0,
+  },
+  cancelButton: {
+    padding: '8px 16px',
+    background: '#dc3545',
     color: 'white',
     border: 'none',
-    borderRadius: '8px',
-    fontSize: '14px',
+    borderRadius: '6px',
+    fontSize: '13px',
     fontWeight: '600',
     cursor: 'pointer',
     transition: 'all 0.3s',
   },
-  downloadAllButton: {
-    flex: 1,
-    padding: '12px',
-    background: '#28a745',
-    color: 'white',
-    border: 'none',
-    borderRadius: '8px',
-    fontSize: '14px',
-    fontWeight: '600',
-    cursor: 'pointer',
-    transition: 'all 0.3s',
+  chunkedInfo: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+    gap: '15px',
+    marginBottom: '20px',
+    padding: '20px',
+    background: '#f8f9fa',
+    borderRadius: '10px',
+    border: '2px solid #e0e0e0',
+  },
+  infoItem: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '5px',
+  },
+  infoLabel: {
+    fontSize: '12px',
+    color: '#666',
+    fontWeight: '500',
+  },
+  infoValue: {
+    fontSize: '18px',
+    color: '#333',
+    fontWeight: '700',
+  },
+  uploadSection: {
+    marginBottom: '30px',
   },
 };

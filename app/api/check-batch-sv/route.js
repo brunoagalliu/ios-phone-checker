@@ -1,14 +1,125 @@
 import { NextResponse } from 'next/server';
 import { 
+  savePhoneCheckWithFile, 
   saveUploadedFile, 
   updateFileStatus,
   updateFileResultsURL
 } from '../../../lib/db.js';
 import { processPhoneArray } from '../../../lib/phoneValidator.js';
+import blooioRateLimiter from '../../../lib/rateLimiter.js';
 import { uploadFile } from '../../../lib/blobStorage.js';
-import { checkBulkInBatches, categorizeBulkResults } from '../../../lib/subscriberVerify.js';
-import { getSubscriberVerifyCache, saveSubscriberVerifyCache } from '../../../lib/phoneCache.js';
+import { getBlooioCacheBatch, saveBlooioCacheBatch } from '../../../lib/phoneCache.js';
 import Papa from 'papaparse';
+
+const BLOOIO_API_URL = 'https://backend.blooio.com/v1/api/contacts';
+
+async function checkSingleNumberWithAPI(phoneNumber, batchId) {
+  const formattedPhone = `+${phoneNumber}`;
+  const apiKey = process.env.BLOOIO_API_KEY;
+  
+  if (!apiKey) {
+    return {
+      phone_number: formattedPhone,
+      error: 'Blooio API key not configured',
+      is_ios: false,
+      supports_imessage: false,
+      supports_sms: false,
+      from_cache: false,
+      source: 'config_error'
+    };
+  }
+  
+  try {
+    console.log(`Blooio API call for: ${formattedPhone}`);
+    
+    const result = await blooioRateLimiter.execute(async () => {
+      const response = await fetch(
+        `${BLOOIO_API_URL}/${encodeURIComponent(formattedPhone)}/capabilities`,
+        {
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Accept': 'application/json'
+          },
+          signal: AbortSignal.timeout(30000)
+        }
+      );
+      
+      if (!response.ok) {
+        let errorMessage = `HTTP ${response.status}`;
+        
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.message || errorData.error || errorMessage;
+          
+          if (response.status === 503 && errorMessage.includes('No active devices')) {
+            errorMessage = 'Blooio: No active devices available';
+          }
+        } catch (e) {
+          const errorText = await response.text();
+          errorMessage = errorText || errorMessage;
+        }
+        
+        if (response.status === 401) errorMessage = 'Invalid API key';
+        if (response.status === 403) errorMessage = 'API access forbidden';
+        if (response.status === 404) errorMessage = 'Phone number not found';
+        if (response.status === 429) errorMessage = 'Rate limit exceeded';
+        
+        return {
+          phone_number: formattedPhone,
+          error: errorMessage,
+          is_ios: false,
+          supports_imessage: false,
+          supports_sms: false,
+          from_cache: false,
+          source: 'api_error'
+        };
+      }
+      
+      const data = await response.json();
+      const capabilities = data.capabilities || {};
+      const supportsIMessage = capabilities.imessage === true || capabilities.iMessage === true;
+      const supportsSMS = capabilities.sms === true || capabilities.SMS === true;
+      
+      return {
+        phone_number: formattedPhone,
+        contact_id: data.contact,
+        contact_type: data.contact_type,
+        is_ios: supportsIMessage,
+        supports_imessage: supportsIMessage,
+        supports_sms: supportsSMS,
+        last_checked_at: data.last_checked_at,
+        error: null,
+        from_cache: false,
+        source: 'api',
+        batch_id: batchId
+      };
+    });
+    
+    return result;
+    
+  } catch (error) {
+    console.error(`Error checking ${formattedPhone}:`, error);
+    
+    let errorMessage = error.message;
+    
+    if (error.name === 'AbortError') {
+      errorMessage = 'Request timeout (30s exceeded)';
+    } else if (error.message.includes('fetch')) {
+      errorMessage = 'Network error';
+    }
+    
+    return {
+      phone_number: formattedPhone,
+      error: errorMessage,
+      is_ios: false,
+      supports_imessage: false,
+      supports_sms: false,
+      from_cache: false,
+      source: 'network_error'
+    };
+  }
+}
 
 export async function POST(request) {
   let fileId = null;
@@ -26,7 +137,7 @@ export async function POST(request) {
       );
     }
     
-    console.log(`Starting SubscriberVerify batch: ${fileName}, batch ID: ${batchId}`);
+    console.log(`Starting Blooio batch: ${fileName}, batch ID: ${batchId}`);
     
     // Upload original file to Vercel Blob
     let originalFileBlob = null;
@@ -105,146 +216,110 @@ export async function POST(request) {
     
     const startTime = Date.now();
     
-    // Convert to 10-digit format for SubscriberVerify (remove +1 prefix)
-    const svPhones = validationResult.valid.map(v => {
-      return v.formatted.replace(/^\+?1/, '');
-    });
+    // BATCH CACHE LOOKUP - ONE QUERY INSTEAD OF THOUSANDS!
+    console.log(`Batch checking Blooio cache for ${validationResult.valid.length} numbers...`);
+    const cacheCheckStart = Date.now();
     
-    console.log(`Prepared ${svPhones.length} numbers for SubscriberVerify (10-digit format)`);
-    console.log(`Checking cache for all numbers...`);
+    // Prepare phone numbers for batch lookup (with +1 prefix)
+    const formattedPhones = validationResult.valid.map(v => `+${v.formatted}`);
     
-    // STEP 1: Check cache for all numbers first
-    const cachedResults = [];
-    const uncachedPhones = [];
-    const uncachedIndices = [];
+    // Batch cache lookup
+    const blooioCacheMap = await getBlooioCacheBatch(formattedPhones);
     
-    for (let i = 0; i < svPhones.length; i++) {
-      const formattedPhone = `+1${svPhones[i]}`;
-      const cached = await getSubscriberVerifyCache(formattedPhone);
+    const cacheCheckTime = ((Date.now() - cacheCheckStart) / 1000).toFixed(2);
+    console.log(`Blooio batch cache check: ${blooioCacheMap.size} hits out of ${formattedPhones.length} in ${cacheCheckTime}s`);
+    
+    const results = [];
+    let cacheHits = 0;
+    let apiCalls = 0;
+    const uncachedData = [];
+    
+    // Process each number
+    for (let i = 0; i < validationResult.valid.length; i++) {
+      const validPhone = validationResult.valid[i];
+      const formattedPhone = `+${validPhone.formatted}`;
       
-      if (cached) {
-        cachedResults.push({ ...cached, index: i });
+      // Check batch cache first
+      const cachedResult = blooioCacheMap.get(formattedPhone);
+      
+      if (cachedResult) {
+        // Use cached result
+        cacheHits++;
+        cachedResult.batch_id = batchId;
+        cachedResult.original_number = validPhone.original;
+        cachedResult.formatted_number = validPhone.formatted;
+        cachedResult.display_number = validPhone.display;
+        
+        await savePhoneCheckWithFile(cachedResult, fileId);
+        results.push(cachedResult);
+        
+        console.log(`[${i + 1}/${validationResult.valid.length}] ${validPhone.formatted} - CACHE HIT (${cachedResult.cache_age_days}d old)`);
       } else {
-        uncachedPhones.push(svPhones[i]);
-        uncachedIndices.push(i);
+        // Need to call API
+        const result = await checkSingleNumberWithAPI(validPhone.formatted, batchId);
+        
+        if (!result.from_cache && result.source === 'api') {
+          apiCalls++;
+          uncachedData.push(result);
+        }
+        
+        result.original_number = validPhone.original;
+        result.formatted_number = validPhone.formatted;
+        result.display_number = validPhone.display;
+        
+        await savePhoneCheckWithFile(result, fileId);
+        results.push(result);
+        
+        const status = result.error ? `ERROR: ${result.error}` : `API - iOS: ${result.is_ios}`;
+        console.log(`[${i + 1}/${validationResult.valid.length}] ${validPhone.formatted} - ${status}`);
+      }
+      
+      // Update progress in database every 10 records
+      if ((i + 1) % 10 === 0 || i === validationResult.valid.length - 1) {
+        await updateFileStatus(fileId, 'processing', {
+          valid_numbers: validationResult.stats.valid,
+          invalid_numbers: validationResult.stats.invalid,
+          duplicate_numbers: validationResult.stats.duplicates
+        });
       }
     }
     
-    console.log(`Cache stats: ${cachedResults.length} cached, ${uncachedPhones.length} need API call`);
-    
-    // STEP 2: Only call API for uncached numbers
-    let svBulkResults = [];
-    
-    if (uncachedPhones.length > 0) {
-      console.log(`Checking ${uncachedPhones.length} numbers with SubscriberVerify bulk API...`);
-      svBulkResults = await checkBulkInBatches(uncachedPhones);
-      console.log(`SubscriberVerify returned ${svBulkResults.length} results`);
+    // BATCH SAVE NEW API RESULTS TO CACHE - ONE QUERY INSTEAD OF THOUSANDS!
+    if (uncachedData.length > 0) {
+      console.log(`Batch saving ${uncachedData.length} new results to cache...`);
+      const cacheSaveStart = Date.now();
       
-      // STEP 3: Save new results to cache (fire and forget)
-      for (let i = 0; i < svBulkResults.length; i++) {
-        const svResult = svBulkResults[i];
-        const originalIndex = uncachedIndices[i];
-        const validPhone = validationResult.valid[originalIndex];
-        
-        const cacheData = {
-          phone_number: validPhone.formatted,
-          action: svResult.action,
-          reason: svResult.reason,
-          deliverable: svResult.action === 'send',
-          carrier: svResult.dipCarrier || svResult.nanpCarrier,
-          carrier_type: svResult.dipCarrierType || svResult.nanpType,
-          is_mobile: (svResult.dipCarrierType === 'mobile' || svResult.nanpType === 'mobile'),
-          litigator: svResult.litigator,
-          blacklisted: svResult.blackList,
-          clicker: svResult.clicker,
-          geo_state: svResult.geoState,
-          geo_city: svResult.geoCity,
-          timezone: svResult.timezone
-        };
-        
-        saveSubscriberVerifyCache(cacheData).catch(err =>
-          console.error('Failed to save to cache:', err)
-        );
-      }
+      await saveBlooioCacheBatch(uncachedData);
+      
+      const cacheSaveTime = ((Date.now() - cacheSaveStart) / 1000).toFixed(2);
+      console.log(`Batch cache save completed in ${cacheSaveTime}s`);
     }
     
-    // STEP 4: Merge cached and fresh results
-    const allResults = new Array(svPhones.length);
+    const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
     
-    // Fill in cached results
-    cachedResults.forEach(cached => {
-      allResults[cached.index] = {
-        subscriber: cached.phone_number.replace(/^\+1/, ''),
-        action: cached.action,
-        reason: cached.reason,
-        nanpType: cached.carrier_type,
-        nanpCarrier: cached.carrier,
-        dipCarrier: cached.carrier,
-        dipCarrierType: cached.carrier_type,
-        litigator: cached.litigator,
-        blackList: cached.blacklisted,
-        clicker: cached.clicker,
-        geoState: cached.geo_state,
-        geoCity: cached.geo_city,
-        timezone: cached.timezone,
-        from_cache: true
-      };
-    });
+    console.log(`Blooio batch complete: ${totalTime}s total, ${cacheHits} from cache, ${apiCalls} API calls`);
     
-    // Fill in fresh API results
-    svBulkResults.forEach((result, i) => {
-      const originalIndex = uncachedIndices[i];
-      allResults[originalIndex] = {
-        ...result,
-        from_cache: false
-      };
-    });
-    
-    const categorized = categorizeBulkResults(allResults);
-    
-    console.log(`Results categorized:`, {
-      send: categorized.send.length,
-      unsubscribe: categorized.unsubscribe.length,
-      blacklist: categorized.blacklist.length,
-      error: categorized.error.length,
-      cached: cachedResults.length
-    });
-    
-    // STEP 5: Format results for CSV
-    const results = allResults.map((svResult, index) => {
-      const validPhone = validationResult.valid[index];
-      
-      return {
-        original_number: validPhone?.original || '',
-        formatted_number: validPhone?.formatted || '',
-        display_number: validPhone?.display || '',
-        action: svResult?.action || 'unknown',
-        reason: svResult?.reason || '',
-        deliverable: svResult?.action === 'send',
-        carrier: svResult?.dipCarrier || svResult?.nanpCarrier || '',
-        carrier_type: svResult?.dipCarrierType || svResult?.nanpType || '',
-        is_mobile: (svResult?.dipCarrierType === 'mobile' || svResult?.nanpType === 'mobile'),
-        litigator: svResult?.litigator || false,
-        blacklisted: svResult?.blackList || false,
-        clicker: svResult?.clicker || false,
-        geo_state: svResult?.geoState || '',
-        geo_city: svResult?.geoCity || '',
-        timezone: svResult?.timezone || '',
-        from_cache: svResult?.from_cache ? 'YES' : 'NO',
-        checked_at: new Date().toISOString()
-      };
-    });
-    
-    console.log(`Formatted ${results.length} results for CSV export`);
-    
-    // Create CSV content
-    const csv = Papa.unparse(results);
-    console.log(`Generated CSV content, size: ${csv.length} bytes`);
+    // Generate results CSV
+    const csv = Papa.unparse(results.map(r => ({
+      original_number: r.original_number,
+      formatted_number: r.formatted_number,
+      display_number: r.display_number,
+      phone_number: r.phone_number,
+      is_ios: r.is_ios ? 'YES' : 'NO',
+      supports_imessage: r.supports_imessage ? 'YES' : 'NO',
+      supports_sms: r.supports_sms ? 'YES' : 'NO',
+      contact_type: r.contact_type || '',
+      contact_id: r.contact_id || '',
+      from_cache: r.from_cache ? 'YES' : 'NO',
+      cache_age_days: r.cache_age_days || '',
+      error: r.error || 'None',
+      checked_at: r.last_checked_at || new Date().toISOString()
+    })));
     
     // Upload results CSV to Blob Storage
     let resultsBlob = null;
     try {
-      const resultsFileName = `${fileName.replace('.csv', '')}_sv_results_${Date.now()}.csv`;
+      const resultsFileName = `${fileName.replace('.csv', '')}_blooio_results_${Date.now()}.csv`;
       resultsBlob = await uploadFile(Buffer.from(csv), resultsFileName, 'results');
       console.log(`Results uploaded to: ${resultsBlob?.url || 'null'}`);
     } catch (resultsUploadError) {
@@ -252,7 +327,7 @@ export async function POST(request) {
       resultsBlob = { url: null, size: csv.length };
     }
     
-    // Update file with results URL (only if we have a URL)
+    // Update file with results URL
     if (resultsBlob?.url) {
       await updateFileResultsURL(fileId, resultsBlob.url, resultsBlob.size || 0);
       console.log(`File results URL updated in database`);
@@ -260,46 +335,39 @@ export async function POST(request) {
       console.warn('No results blob URL to update');
     }
     
+    // Count iOS devices
+    const iosCount = results.filter(r => r.is_ios).length;
+    const errorCount = results.filter(r => r.error && r.error !== 'None').length;
+    
     // Update file status to completed
     await updateFileStatus(fileId, 'completed', {
-      valid_numbers: validationResult.stats.valid || 0,
-      invalid_numbers: validationResult.stats.invalid || 0,
-      duplicate_numbers: validationResult.stats.duplicates || 0,
-      sv_send_count: categorized.send?.length || 0,
-      sv_unsubscribe_count: categorized.unsubscribe?.length || 0,
-      sv_blacklist_count: categorized.blacklist?.length || 0
+      valid_numbers: validationResult.stats.valid,
+      invalid_numbers: validationResult.stats.invalid,
+      duplicate_numbers: validationResult.stats.duplicates
     });
     
     console.log(`File status updated to completed`);
     
-    const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
-    
-    console.log(`SubscriberVerify batch complete: ${totalTime}s total, ${cachedResults.length} from cache, ${uncachedPhones.length} API calls`);
-    
     return NextResponse.json({
       success: true,
-      service: 'subscriberverify',
+      service: 'blooio',
       batch_id: batchId,
       file_id: fileId,
       original_file_url: originalFileBlob?.url || null,
       results_file_url: resultsBlob?.url || null,
       validation: validationResult.stats,
-      subscriber_verify_stats: {
-        send: categorized.send?.length || 0,
-        unsubscribe: categorized.unsubscribe?.length || 0,
-        blacklist: categorized.blacklist?.length || 0,
-        error: categorized.error?.length || 0
-      },
-      cache_hits: cachedResults.length,
-      api_calls: uncachedPhones.length,
-      api_calls_saved: cachedResults.length,
+      ios_count: iosCount,
+      error_count: errorCount,
+      cache_hits: cacheHits,
+      api_calls: apiCalls,
+      api_calls_saved: cacheHits,
       total_processed: results.length,
       processing_time_seconds: parseFloat(totalTime),
       results: results
     });
     
   } catch (error) {
-    console.error('SubscriberVerify batch error:', error);
+    console.error('Blooio batch error:', error);
     console.error('Error name:', error.name);
     console.error('Error message:', error.message);
     console.error('Error stack:', error.stack);
