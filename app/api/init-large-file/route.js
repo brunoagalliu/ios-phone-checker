@@ -11,6 +11,8 @@ export async function POST(request) {
     const fileName = formData.get('fileName');
     const service = formData.get('service');
     
+    console.log(`Initializing large file: ${fileName} for ${service} service`);
+    
     // Upload original
     const fileBuffer = Buffer.from(await file.arrayBuffer());
     const originalFileBlob = await uploadFile(fileBuffer, fileName, 'originals');
@@ -20,7 +22,23 @@ export async function POST(request) {
     const parseResult = Papa.parse(fileText, { header: true, skipEmptyLines: true });
     
     const phoneColumn = findPhoneColumn(parseResult.data);
-    const phones = parseResult.data.map(row => row[phoneColumn]).filter(Boolean);
+    if (!phoneColumn) {
+      return NextResponse.json(
+        { error: 'Could not find phone number column' },
+        { status: 400 }
+      );
+    }
+    
+    const phones = parseResult.data
+      .map(row => row[phoneColumn])
+      .filter(phone => phone && phone.toString().trim());
+    
+    if (phones.length === 0) {
+      return NextResponse.json(
+        { error: 'No phone numbers found' },
+        { status: 400 }
+      );
+    }
     
     const validationResult = processPhoneArray(phones);
     const batchId = `batch_${Date.now()}`;
@@ -32,6 +50,19 @@ export async function POST(request) {
       fileName: fileName,
       service: service
     });
+    
+    // Calculate chunk size and estimated time based on service
+    let chunkSize, estimatedChunks, estimatedTimeMinutes;
+    
+    if (service === 'blooio') {
+      chunkSize = 200; // 200 per chunk (4 req/sec * 50 sec)
+      estimatedChunks = Math.ceil(validationResult.stats.valid / chunkSize);
+      estimatedTimeMinutes = Math.ceil(estimatedChunks * 1); // ~1 min per chunk
+    } else {
+      chunkSize = 5000; // 5000 per chunk for SubscriberVerify
+      estimatedChunks = Math.ceil(validationResult.stats.valid / chunkSize);
+      estimatedTimeMinutes = Math.ceil(estimatedChunks * 0.25); // ~15 sec per chunk
+    }
     
     // Save to database
     const fileId = await saveUploadedFile({
@@ -53,16 +84,20 @@ export async function POST(request) {
       original_file_size: originalFileBlob.size
     });
     
+    console.log(`File initialized with ID: ${fileId}, service: ${service}`);
+    
     return NextResponse.json({
       success: true,
       fileId: fileId,
+      service: service,
       totalRecords: validationResult.stats.valid,
-      chunkSize: 5000,
-      estimatedChunks: Math.ceil(validationResult.stats.valid / 5000),
-      estimatedTime: Math.ceil(validationResult.stats.valid / 5000) + ' minutes'
+      chunkSize: chunkSize,
+      estimatedChunks: estimatedChunks,
+      estimatedTime: `${estimatedTimeMinutes} minutes`
     });
     
   } catch (error) {
+    console.error('Init large file error:', error);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }

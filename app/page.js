@@ -19,7 +19,8 @@ export default function Home() {
       // Check if file is large (> 10MB or needs chunked processing)
       const isLargeFile = file.size > 10 * 1024 * 1024; // 10MB threshold
 
-      if (isLargeFile && service === 'subscriberverify') {
+      //if (isLargeFile && service === 'subscriberverify') {
+        if (isLargeFile) {
         console.log(`Large file detected: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
         
         try {
@@ -46,6 +47,7 @@ export default function Home() {
               fileId: data.fileId,
               totalRecords: data.totalRecords,
               fileName: file.name,
+              service: service,
               chunkSize: data.chunkSize,
               estimatedChunks: data.estimatedChunks,
               estimatedTime: data.estimatedTime
@@ -228,6 +230,7 @@ export default function Home() {
             <ChunkedProcessor
               fileId={chunkedProcessing.fileId}
               totalRecords={chunkedProcessing.totalRecords}
+              service={chunkedProcessing.service}
               onComplete={handleChunkedComplete}
             />
           </div>

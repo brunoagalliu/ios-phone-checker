@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 
-export default function ChunkedProcessor({ fileId, totalRecords, onComplete }) {
+export default function ChunkedProcessor({ fileId, totalRecords, service, onComplete }) {
   const [progress, setProgress] = useState(0);
   const [processing, setProcessing] = useState(false);
   const [currentOffset, setCurrentOffset] = useState(0);
@@ -30,8 +30,11 @@ export default function ChunkedProcessor({ fileId, totalRecords, onComplete }) {
 
     try {
       console.log(`Processing chunk starting at offset ${currentOffset}`);
+      const endpoint = service === 'blooio' 
+      ? '/api/check-batch-blooio-chunked'
+      : '/api/check-batch-chunked';
       
-      const response = await fetch('/api/check-batch-chunked', {
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
