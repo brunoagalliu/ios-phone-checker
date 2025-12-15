@@ -17,19 +17,51 @@ export default function Home() {
     setError(null);
   
     for (const file of files) {
-      // UPDATED: Better large file detection
       const fileSizeMB = file.size / (1024 * 1024);
-      const estimatedRecords = Math.floor(file.size / 100); // Rough estimate: 100 bytes per record
       
-      console.log(`File: ${file.name}, Size: ${fileSizeMB.toFixed(2)} MB, Estimated records: ${estimatedRecords}`);
+      console.log(`File: ${file.name}, Size: ${fileSizeMB.toFixed(2)} MB, Service: ${service}`);
       
-      // Use chunked processing if:
-      // - File is > 5MB, OR
-      // - Estimated records > 5000
-      const shouldUseChunkedProcessing = fileSizeMB > 5 || estimatedRecords > 5000;
+      // IMPORTANT: For Blooio, ALWAYS use chunked processing if > 500 records estimated
+      // For SubscriberVerify, use chunked if > 5000 records estimated
       
-      if (shouldUseChunkedProcessing) {
-        console.log(`✓ Large file detected - using chunked processing`);
+      // Parse CSV to count actual records (client-side)
+      const shouldCheckRecordCount = fileSizeMB > 0.1; // Check if file > 100KB
+      
+      let actualRecordCount = 0;
+      let useChunkedProcessing = false;
+      
+      if (shouldCheckRecordCount) {
+        try {
+          console.log('Counting records in file...');
+          const fileText = await file.text();
+          const lines = fileText.split('\n').filter(line => line.trim());
+          actualRecordCount = lines.length - 1; // Subtract header
+          
+          console.log(`Actual record count: ${actualRecordCount}`);
+          
+          // Decision logic based on service
+          if (service === 'blooio') {
+            // Blooio: 4 req/sec = 240/min = need chunked if > 500 records
+            useChunkedProcessing = actualRecordCount > 500;
+          } else {
+            // SubscriberVerify: Bulk API = need chunked if > 5000 records
+            useChunkedProcessing = actualRecordCount > 5000;
+          }
+          
+        } catch (countError) {
+          console.error('Failed to count records:', countError);
+          // Fallback to file size estimation
+          useChunkedProcessing = fileSizeMB > 5;
+        }
+      } else {
+        // Small file, use regular processing
+        useChunkedProcessing = false;
+      }
+      
+      console.log(`Decision: ${useChunkedProcessing ? 'CHUNKED' : 'REGULAR'} processing (${actualRecordCount} records, ${service} service)`);
+      
+      if (useChunkedProcessing) {
+        console.log(`✓ Using chunked processing for ${actualRecordCount} records`);
         
         try {
           // Initialize for chunked processing
@@ -62,6 +94,9 @@ export default function Home() {
             });
             
             console.log('✓ File initialized for chunked processing:', data);
+            
+            // Show user the chunked processor
+            alert(`📊 Large file detected!\n\n${data.totalRecords.toLocaleString()} records\nUsing chunked processing\n\nEstimated time: ${data.estimatedTime}`);
           }
         } catch (err) {
           console.error('Failed to initialize large file:', err);
@@ -72,7 +107,7 @@ export default function Home() {
       }
   
       // Regular processing for small files
-      console.log(`Using regular processing for small file`);
+      console.log(`Using regular processing`);
       
       const newFile = {
         id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
