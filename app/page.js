@@ -96,7 +96,7 @@ export default function Home() {
             console.log('✓ File initialized for chunked processing:', data);
             
             // Show user the chunked processor
-            alert(`📊 Large file detected!\n\n${data.totalRecords.toLocaleString()} records\nUsing chunked processing\n\nEstimated time: ${data.estimatedTime}`);
+            //alert(`📊 Large file detected!\n\n${data.totalRecords.toLocaleString()} records\nUsing chunked processing\n\nEstimated time: ${data.estimatedTime}`);
           }
         } catch (err) {
           console.error('Failed to initialize large file:', err);
@@ -226,7 +226,7 @@ export default function Home() {
             Validate US phone numbers and check iOS/iMessage support
           </p>
         </header>
-
+  
         {error && (
           <div style={styles.errorBanner}>
             <span style={styles.errorIcon}>⚠️</span>
@@ -239,16 +239,16 @@ export default function Home() {
             </button>
           </div>
         )}
-
-        {/* Show chunked processor if large file is being processed */}
-        {chunkedProcessing ? (
+  
+        {/* CHUNKED PROCESSOR - Should show when file is initialized */}
+        {chunkedProcessing && (
           <div style={styles.chunkedSection}>
             <div style={styles.chunkedHeader}>
               <h2 style={styles.chunkedTitle}>
                 🚀 Processing Large File: {chunkedProcessing.fileName}
               </h2>
               <button
-                onClick={handleChunkedCancel}
+                onClick={() => setChunkedProcessing(null)}
                 style={styles.cancelButton}
               >
                 Cancel
@@ -273,7 +273,7 @@ export default function Home() {
                 <span style={styles.infoValue}>{chunkedProcessing.estimatedTime}</span>
               </div>
             </div>
-
+  
             <ChunkedProcessor
               fileId={chunkedProcessing.fileId}
               totalRecords={chunkedProcessing.totalRecords}
@@ -281,9 +281,11 @@ export default function Home() {
               onComplete={handleChunkedComplete}
             />
           </div>
-        ) : (
+        )}
+  
+        {/* Normal upload interface - Hide when chunked processing */}
+        {!chunkedProcessing && (
           <>
-            {/* Normal file upload interface */}
             <div style={styles.uploadSection}>
               <FileUploader
                 onFilesSelected={handleFilesSelected}
@@ -291,15 +293,13 @@ export default function Home() {
               />
               <Instructions />
             </div>
-
-            {/* Processing queue for small files */}
+  
             {processingFiles.length > 0 && (
               <ProcessingQueue files={processingFiles} />
             )}
           </>
         )}
-        <FileProgressChecker />
-
+  
         {/* File history - always visible */}
         <FileHistory />
       </div>
