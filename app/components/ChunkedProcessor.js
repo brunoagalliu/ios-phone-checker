@@ -14,7 +14,14 @@ export default function ChunkedProcessor({ fileId, totalRecords, service, onComp
     chunksProcessed: 0
   });
   const [isPaused, setIsPaused] = useState(false);
+  const [autoMode, setAutoMode] = useState(false);
   const processingRef = useRef(false);
+  const autoModeRef = useRef(false);
+
+  // Auto-process when in auto mode
+  useEffect(() => {
+    autoModeRef.current = autoMode;
+  }, [autoMode]);
 
   useEffect(() => {
     if (processing && !isPaused && currentOffset < totalRecords && !processingRef.current) {
@@ -30,9 +37,11 @@ export default function ChunkedProcessor({ fileId, totalRecords, service, onComp
 
     try {
       console.log(`Processing chunk starting at offset ${currentOffset}`);
+      
+      // Determine which endpoint to use based on service
       const endpoint = service === 'blooio' 
-      ? '/api/check-batch-blooio-chunked'
-      : '/api/check-batch-chunked';
+        ? '/api/check-batch-blooio-chunked'
+        : '/api/check-batch-chunked';
       
       const response = await fetch(endpoint, {
         method: 'POST',
@@ -63,6 +72,7 @@ export default function ChunkedProcessor({ fileId, totalRecords, service, onComp
 
       if (data.isComplete) {
         setProcessing(false);
+        setAutoMode(false);
         if (onComplete) {
           onComplete(data);
         }
@@ -71,6 +81,7 @@ export default function ChunkedProcessor({ fileId, totalRecords, service, onComp
       console.error('Chunk processing error:', error);
       setError(error.message);
       setProcessing(false);
+      setAutoMode(false);
     } finally {
       processingRef.current = false;
     }
@@ -82,8 +93,16 @@ export default function ChunkedProcessor({ fileId, totalRecords, service, onComp
     setError(null);
   };
 
+  const startAutoMode = () => {
+    setAutoMode(true);
+    setProcessing(true);
+    setIsPaused(false);
+    setError(null);
+  };
+
   const pauseProcessing = () => {
     setIsPaused(true);
+    setAutoMode(false);
   };
 
   const resumeProcessing = () => {
@@ -94,6 +113,7 @@ export default function ChunkedProcessor({ fileId, totalRecords, service, onComp
   const stopProcessing = () => {
     setProcessing(false);
     setIsPaused(false);
+    setAutoMode(false);
   };
 
   const estimatedTimeRemaining = () => {
@@ -101,13 +121,21 @@ export default function ChunkedProcessor({ fileId, totalRecords, service, onComp
     
     const avgTimePerChunk = stats.elapsedTime / stats.chunksProcessed;
     const remainingRecords = totalRecords - currentOffset;
-    const remainingChunks = Math.ceil(remainingRecords / 5000);
+    const chunkSize = service === 'blooio' ? 200 : 5000;
+    const remainingChunks = Math.ceil(remainingRecords / chunkSize);
     const remainingSeconds = remainingChunks * avgTimePerChunk;
     
-    const minutes = Math.floor(remainingSeconds / 60);
+    const hours = Math.floor(remainingSeconds / 3600);
+    const minutes = Math.floor((remainingSeconds % 3600) / 60);
     const seconds = Math.floor(remainingSeconds % 60);
     
-    return `${minutes}m ${seconds}s`;
+    if (hours > 0) {
+      return `${hours}h ${minutes}m`;
+    } else if (minutes > 0) {
+      return `${minutes}m ${seconds}s`;
+    } else {
+      return `${seconds}s`;
+    }
   };
 
   const isComplete = currentOffset >= totalRecords;
@@ -128,7 +156,7 @@ export default function ChunkedProcessor({ fileId, totalRecords, service, onComp
             style={{
               ...styles.progressFill,
               width: `${progress}%`,
-              background: error ? '#dc3545' : isComplete ? '#28a745' : 'linear-gradient(90deg, #667eea 0%, #764ba2 100%)'
+              background: error ? '#dc3545' : isComplete ? '#28a745' : autoMode ? 'linear-gradient(90deg, #28a745 0%, #20c997 100%)' : 'linear-gradient(90deg, #667eea 0%, #764ba2 100%)'
             }}
           />
         </div>
@@ -140,30 +168,53 @@ export default function ChunkedProcessor({ fileId, totalRecords, service, onComp
       {/* Control Buttons */}
       <div style={styles.controls}>
         {!processing && !isComplete && (
-          <button
-            onClick={startProcessing}
-            style={styles.startButton}
-          >
-            ▶️ {currentOffset > 0 ? 'Resume' : 'Start'} Processing
-          </button>
+          <>
+            <button
+              onClick={startProcessing}
+              style={styles.startButton}
+            >
+              ▶️ {currentOffset > 0 ? 'Resume Manual' : 'Start Manual'}
+            </button>
+            <button
+              onClick={startAutoMode}
+              style={styles.autoButton}
+            >
+              🚀 {currentOffset > 0 ? 'Resume Auto' : 'Start Auto Processing'}
+            </button>
+          </>
         )}
 
         {processing && !isPaused && (
-          <button
-            onClick={pauseProcessing}
-            style={styles.pauseButton}
-          >
-            ⏸️ Pause
-          </button>
+          <>
+            <button
+              onClick={pauseProcessing}
+              style={styles.pauseButton}
+            >
+              ⏸️ Pause
+            </button>
+            {autoMode && (
+              <div style={styles.autoModeIndicator}>
+                🤖 Auto Mode Active
+              </div>
+            )}
+          </>
         )}
 
         {processing && isPaused && (
-          <button
-            onClick={resumeProcessing}
-            style={styles.resumeButton}
-          >
-            ▶️ Resume
-          </button>
+          <>
+            <button
+              onClick={resumeProcessing}
+              style={styles.resumeButton}
+            >
+              ▶️ Resume
+            </button>
+            <button
+              onClick={startAutoMode}
+              style={styles.autoButton}
+            >
+              🚀 Resume Auto
+            </button>
+          </>
         )}
 
         {(processing || isPaused) && !isComplete && (
@@ -181,6 +232,18 @@ export default function ChunkedProcessor({ fileId, totalRecords, service, onComp
           </div>
         )}
       </div>
+
+      {/* Mode Explanation */}
+      {!processing && !isComplete && (
+        <div style={styles.modeExplanation}>
+          <div style={styles.modeOption}>
+            <strong>▶️ Manual Mode:</strong> Click "Process Next Chunk" for each chunk
+          </div>
+          <div style={styles.modeOption}>
+            <strong>🚀 Auto Mode:</strong> Automatically processes all chunks until complete
+          </div>
+        </div>
+      )}
 
       {/* Stats */}
       {(processing || currentOffset > 0) && (
@@ -219,7 +282,11 @@ export default function ChunkedProcessor({ fileId, totalRecords, service, onComp
       {/* Status Messages */}
       {processing && !isPaused && !error && (
         <div style={styles.statusMessage}>
-          🔄 Processing chunk {stats.chunksProcessed + 1}...
+          {autoMode ? (
+            <>🤖 Auto-processing chunk {stats.chunksProcessed + 1}... (will continue automatically)</>
+          ) : (
+            <>🔄 Processing chunk {stats.chunksProcessed + 1}... (click pause to stop)</>
+          )}
         </div>
       )}
 
@@ -233,10 +300,10 @@ export default function ChunkedProcessor({ fileId, totalRecords, service, onComp
         <div style={styles.errorMessage}>
           ❌ Error: {error}
           <button 
-            onClick={startProcessing}
+            onClick={startAutoMode}
             style={styles.retryButton}
           >
-            🔄 Retry
+            🔄 Retry Auto
           </button>
         </div>
       )}
@@ -245,13 +312,21 @@ export default function ChunkedProcessor({ fileId, totalRecords, service, onComp
       <div style={styles.infoBox}>
         <div style={styles.infoTitle}>ℹ️ How It Works:</div>
         <ul style={styles.infoList}>
-          <li>Processes 5,000 records per chunk (10-15 seconds each)</li>
-          <li>You can pause/resume anytime - progress is saved</li>
+          <li><strong>Auto Mode (Recommended):</strong> Click once and let it run. Processes all {Math.ceil(totalRecords / (service === 'blooio' ? 200 : 5000))} chunks automatically.</li>
+          <li><strong>Manual Mode:</strong> Click "Process Next Chunk" for each chunk (useful for testing).</li>
+          <li>Chunk size: {service === 'blooio' ? '200 records (~50 sec each)' : '5,000 records (~15 sec each)'}</li>
           <li>Cache is checked first to save API calls</li>
-          <li>Results are saved automatically after each chunk</li>
-          <li>Safe to close browser - just reload and resume</li>
+          <li>Progress is saved - you can close the browser and resume later</li>
+          <li>{service === 'blooio' ? '⚠️ Blooio: 20k records = ~90 minutes total (4 req/sec limit)' : '✅ SubscriberVerify: Bulk API is much faster'}</li>
         </ul>
       </div>
+
+      {/* Warning for Blooio */}
+      {service === 'blooio' && totalRecords > 5000 && (
+        <div style={styles.warningBox}>
+          <strong>⚠️ Blooio Large File Warning:</strong> Processing {totalRecords.toLocaleString()} records will take approximately {Math.ceil(totalRecords / 200 * 50 / 60)} minutes due to API rate limits (4 requests/second). Auto mode will handle this automatically, but you can close this tab and resume later.
+        </div>
+      )}
     </div>
   );
 }
@@ -314,8 +389,20 @@ const styles = {
     gap: '10px',
     marginBottom: '20px',
     flexWrap: 'wrap',
+    alignItems: 'center',
   },
   startButton: {
+    padding: '12px 24px',
+    background: '#667eea',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    fontSize: '14px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'all 0.3s',
+  },
+  autoButton: {
     padding: '12px 24px',
     background: '#28a745',
     color: 'white',
@@ -325,6 +412,7 @@ const styles = {
     fontWeight: '600',
     cursor: 'pointer',
     transition: 'all 0.3s',
+    boxShadow: '0 4px 6px rgba(40, 167, 69, 0.3)',
   },
   pauseButton: {
     padding: '12px 24px',
@@ -366,6 +454,28 @@ const styles = {
     borderRadius: '8px',
     fontSize: '14px',
     fontWeight: '600',
+  },
+  autoModeIndicator: {
+    padding: '8px 16px',
+    background: '#d4edda',
+    color: '#155724',
+    borderRadius: '20px',
+    fontSize: '13px',
+    fontWeight: '600',
+    animation: 'pulse 2s infinite',
+  },
+  modeExplanation: {
+    background: '#e7f3ff',
+    padding: '15px',
+    borderRadius: '8px',
+    marginBottom: '20px',
+    border: '1px solid #b8daff',
+  },
+  modeOption: {
+    fontSize: '13px',
+    color: '#004085',
+    marginBottom: '8px',
+    lineHeight: '1.6',
   },
   statsGrid: {
     display: 'grid',
@@ -437,6 +547,7 @@ const styles = {
     padding: '15px',
     borderRadius: '8px',
     border: '1px solid #b8daff',
+    marginBottom: '15px',
   },
   infoTitle: {
     fontSize: '13px',
@@ -450,5 +561,14 @@ const styles = {
     fontSize: '12px',
     color: '#004085',
     lineHeight: '1.8',
+  },
+  warningBox: {
+    background: '#fff3cd',
+    padding: '15px',
+    borderRadius: '8px',
+    border: '2px solid #ffc107',
+    color: '#856404',
+    fontSize: '13px',
+    lineHeight: '1.6',
   },
 };
