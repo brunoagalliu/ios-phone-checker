@@ -15,14 +15,21 @@ export default function Home() {
 
   const handleFilesSelected = async (files, service) => {
     setError(null);
-
+  
     for (const file of files) {
-      // Check if file is large (> 10MB or needs chunked processing)
-      const isLargeFile = file.size > 10 * 1024 * 1024; // 10MB threshold
-
-      //if (isLargeFile && service === 'subscriberverify') {
-        if (isLargeFile) {
-        console.log(`Large file detected: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
+      // UPDATED: Better large file detection
+      const fileSizeMB = file.size / (1024 * 1024);
+      const estimatedRecords = Math.floor(file.size / 100); // Rough estimate: 100 bytes per record
+      
+      console.log(`File: ${file.name}, Size: ${fileSizeMB.toFixed(2)} MB, Estimated records: ${estimatedRecords}`);
+      
+      // Use chunked processing if:
+      // - File is > 5MB, OR
+      // - Estimated records > 5000
+      const shouldUseChunkedProcessing = fileSizeMB > 5 || estimatedRecords > 5000;
+      
+      if (shouldUseChunkedProcessing) {
+        console.log(`✓ Large file detected - using chunked processing`);
         
         try {
           // Initialize for chunked processing
@@ -30,39 +37,43 @@ export default function Home() {
           formData.append('file', file);
           formData.append('fileName', file.name);
           formData.append('service', service);
-
+  
           const response = await fetch('/api/init-large-file', {
             method: 'POST',
             body: formData
           });
-
+  
           if (!response.ok) {
             const errorData = await response.json();
             throw new Error(errorData.error || 'Failed to initialize file');
           }
-
+  
           const data = await response.json();
-
+  
           if (data.success) {
             setChunkedProcessing({
               fileId: data.fileId,
               totalRecords: data.totalRecords,
               fileName: file.name,
-              service: service,
+              service: data.service,
               chunkSize: data.chunkSize,
               estimatedChunks: data.estimatedChunks,
               estimatedTime: data.estimatedTime
             });
+            
+            console.log('✓ File initialized for chunked processing:', data);
           }
         } catch (err) {
           console.error('Failed to initialize large file:', err);
           setError(`Failed to initialize ${file.name}: ${err.message}`);
         }
-
+  
         continue; // Skip normal processing for this file
       }
-
+  
       // Regular processing for small files
+      console.log(`Using regular processing for small file`);
+      
       const newFile = {
         id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         name: file.name,
@@ -76,9 +87,9 @@ export default function Home() {
         results: null,
         error: null,
       };
-
+  
       setProcessingFiles(prev => [...prev, newFile]);
-
+  
       // Process immediately
       await processFile(newFile);
     }
