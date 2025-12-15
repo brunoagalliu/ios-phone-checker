@@ -1,42 +1,13 @@
 'use client';
 
 import { useState } from 'react';
-const [reinitializing, setReinitializing] = useState(false);
-
-const reinitializeFile = async () => {
-    if (!confirm('This will reinitialize the file for chunked processing. Continue?')) {
-      return;
-    }
-  
-    setReinitializing(true);
-  
-    try {
-      const response = await fetch('/api/reinit-file', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileId: parseInt(fileId) })
-      });
-  
-      const data = await response.json();
-  
-      if (data.success) {
-        alert(`✅ File reinitialized!\n\nService: ${data.service}\nTotal Records: ${data.totalRecords.toLocaleString()}\nChunk Size: ${data.chunkSize}\nEstimated Chunks: ${data.estimatedChunks}\n\nYou can now use chunked processing.`);
-        checkProgress(); // Refresh
-      } else {
-        alert('❌ Error: ' + data.error);
-      }
-    } catch (err) {
-      alert('❌ Failed to reinitialize: ' + err.message);
-    } finally {
-      setReinitializing(false);
-    }
-  };
 
 export default function FileProgressChecker() {
   const [fileId, setFileId] = useState('');
   const [progress, setProgress] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [reinitializing, setReinitializing] = useState(false);
 
   const checkProgress = async () => {
     if (!fileId) {
@@ -66,21 +37,21 @@ export default function FileProgressChecker() {
 
   const resumeProcessing = async () => {
     if (!progress) return;
-  
+
     setLoading(true);
-  
+
     try {
       const endpoint = progress.service === 'blooio' 
         ? '/api/check-batch-blooio-chunked'
         : '/api/check-batch-chunked';
-  
+
       console.log('Resuming processing:', {
         endpoint,
         fileId: parseInt(fileId),
         resumeFrom: progress.processing_offset,
         service: progress.service
       });
-  
+
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -89,24 +60,22 @@ export default function FileProgressChecker() {
           resumeFrom: progress.processing_offset 
         })
       });
-  
+
       console.log('Response status:', response.status);
-      console.log('Response headers:', Object.fromEntries(response.headers.entries()));
-  
-      // Check if response is actually JSON
+
       const contentType = response.headers.get('content-type');
       if (!contentType || !contentType.includes('application/json')) {
         const text = await response.text();
         console.error('Non-JSON response:', text);
         throw new Error(`Server returned ${response.status}: ${text.substring(0, 200)}`);
       }
-  
+
       const data = await response.json();
       console.log('Response data:', data);
       
       if (data.success) {
         alert(`✅ Chunk processed!\n\n${data.processed} / ${data.total} records complete\n\nCache hits: ${data.cacheHits}\nAPI calls: ${data.apiCalls}\nTime: ${data.elapsedSeconds}s`);
-        checkProgress(); // Refresh progress
+        checkProgress();
       } else {
         alert('❌ Error: ' + (data.error || 'Unknown error'));
       }
@@ -115,6 +84,35 @@ export default function FileProgressChecker() {
       alert('❌ Failed to resume:\n\n' + err.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const reinitializeFile = async () => {
+    if (!confirm('This will reinitialize the file for chunked processing. Continue?')) {
+      return;
+    }
+
+    setReinitializing(true);
+
+    try {
+      const response = await fetch('/api/reinit-file', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileId: parseInt(fileId) })
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        alert(`✅ File reinitialized!\n\nService: ${data.service}\nTotal Records: ${data.totalRecords.toLocaleString()}\nChunk Size: ${data.chunkSize}\nEstimated Chunks: ${data.estimatedChunks}\n\nYou can now use chunked processing.`);
+        checkProgress();
+      } else {
+        alert('❌ Error: ' + data.error);
+      }
+    } catch (err) {
+      alert('❌ Failed to reinitialize: ' + err.message);
+    } finally {
+      setReinitializing(false);
     }
   };
 
@@ -211,42 +209,45 @@ export default function FileProgressChecker() {
             </div>
           )}
 
-          {progress.processing_status === 'processing' && (
+          {progress.processing_status === 'processing' && progress.can_resume && (
             <div style={styles.actionSection}>
               <button 
                 onClick={resumeProcessing}
+                disabled={loading}
                 style={styles.resumeButton}
               >
-                ▶️ Process Next Chunk
+                {loading ? '⏳ Processing...' : '▶️ Process Next Chunk'}
               </button>
               <p style={styles.hint}>
                 💡 Click this button repeatedly to continue processing, or use the automatic processor above.
               </p>
             </div>
           )}
-          {progress && !progress.can_resume && (
-  <div style={styles.actionSection}>
-    <button 
-      onClick={reinitializeFile}
-      disabled={reinitializing}
-      style={styles.reinitButton}
-    >
-      {reinitializing ? '⏳ Reinitializing...' : '🔄 Reinitialize for Chunked Processing'}
-    </button>
-    <p style={styles.hint}>
-      💡 This file wasn't set up for chunked processing. Click to reinitialize it.
-    </p>
-  </div>
-)}
 
-          {progress.processing_status === 'initialized' && (
+          {progress.processing_status === 'initialized' && progress.can_resume && (
             <div style={styles.actionSection}>
               <button 
                 onClick={resumeProcessing}
+                disabled={loading}
                 style={styles.startButton}
               >
-                ▶️ Start Processing
+                {loading ? '⏳ Starting...' : '▶️ Start Processing'}
               </button>
+            </div>
+          )}
+
+          {!progress.can_resume && progress.processing_status !== 'completed' && (
+            <div style={styles.actionSection}>
+              <button 
+                onClick={reinitializeFile}
+                disabled={reinitializing}
+                style={styles.reinitButton}
+              >
+                {reinitializing ? '⏳ Reinitializing...' : '🔄 Reinitialize for Chunked Processing'}
+              </button>
+              <p style={styles.hint}>
+                💡 This file wasn't set up for chunked processing. Click to reinitialize it.
+              </p>
             </div>
           )}
 
@@ -440,6 +441,17 @@ const styles = {
     fontWeight: '600',
     cursor: 'pointer',
   },
+  reinitButton: {
+    padding: '12px 24px',
+    background: '#ffc107',
+    color: '#333',
+    border: 'none',
+    borderRadius: '8px',
+    fontSize: '14px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    marginBottom: '10px',
+  },
   hint: {
     fontSize: '12px',
     color: '#666',
@@ -466,16 +478,5 @@ const styles = {
     fontSize: '13px',
     color: '#333',
     fontWeight: '600',
-  },
-  reinitButton: {
-    padding: '12px 24px',
-    background: '#ffc107',
-    color: '#333',
-    border: 'none',
-    borderRadius: '8px',
-    fontSize: '14px',
-    fontWeight: '600',
-    cursor: 'pointer',
-    marginBottom: '10px',
   },
 };
