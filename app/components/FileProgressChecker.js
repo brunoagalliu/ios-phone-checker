@@ -36,12 +36,21 @@ export default function FileProgressChecker() {
 
   const resumeProcessing = async () => {
     if (!progress) return;
-
+  
+    setLoading(true);
+  
     try {
       const endpoint = progress.service === 'blooio' 
         ? '/api/check-batch-blooio-chunked'
         : '/api/check-batch-chunked';
-
+  
+      console.log('Resuming processing:', {
+        endpoint,
+        fileId: parseInt(fileId),
+        resumeFrom: progress.processing_offset,
+        service: progress.service
+      });
+  
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -50,17 +59,32 @@ export default function FileProgressChecker() {
           resumeFrom: progress.processing_offset 
         })
       });
-
+  
+      console.log('Response status:', response.status);
+      console.log('Response headers:', Object.fromEntries(response.headers.entries()));
+  
+      // Check if response is actually JSON
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await response.text();
+        console.error('Non-JSON response:', text);
+        throw new Error(`Server returned ${response.status}: ${text.substring(0, 200)}`);
+      }
+  
       const data = await response.json();
+      console.log('Response data:', data);
       
       if (data.success) {
-        alert(`Chunk processed! ${data.processed} / ${data.total} complete`);
+        alert(`✅ Chunk processed!\n\n${data.processed} / ${data.total} records complete\n\nCache hits: ${data.cacheHits}\nAPI calls: ${data.apiCalls}\nTime: ${data.elapsedSeconds}s`);
         checkProgress(); // Refresh progress
       } else {
-        alert('Error: ' + data.error);
+        alert('❌ Error: ' + (data.error || 'Unknown error'));
       }
     } catch (err) {
-      alert('Failed to resume: ' + err.message);
+      console.error('Resume error:', err);
+      alert('❌ Failed to resume:\n\n' + err.message);
+    } finally {
+      setLoading(false);
     }
   };
 
