@@ -15,14 +15,11 @@ export default function Home() {
 
   const handleFilesSelected = async (files, service) => {
     setError(null);
-  
+
     for (const file of files) {
       const fileSizeMB = file.size / (1024 * 1024);
       
       console.log(`File: ${file.name}, Size: ${fileSizeMB.toFixed(2)} MB, Service: ${service}`);
-      
-      // IMPORTANT: For Blooio, ALWAYS use chunked processing if > 500 records estimated
-      // For SubscriberVerify, use chunked if > 5000 records estimated
       
       // Parse CSV to count actual records (client-side)
       const shouldCheckRecordCount = fileSizeMB > 0.1; // Check if file > 100KB
@@ -69,19 +66,19 @@ export default function Home() {
           formData.append('file', file);
           formData.append('fileName', file.name);
           formData.append('service', service);
-  
+
           const response = await fetch('/api/init-large-file', {
             method: 'POST',
             body: formData
           });
-  
+
           if (!response.ok) {
             const errorData = await response.json();
             throw new Error(errorData.error || 'Failed to initialize file');
           }
-  
+
           const data = await response.json();
-  
+
           if (data.success) {
             setChunkedProcessing({
               fileId: data.fileId,
@@ -94,18 +91,15 @@ export default function Home() {
             });
             
             console.log('✓ File initialized for chunked processing:', data);
-            
-            // Show user the chunked processor
-            //alert(`📊 Large file detected!\n\n${data.totalRecords.toLocaleString()} records\nUsing chunked processing\n\nEstimated time: ${data.estimatedTime}`);
           }
         } catch (err) {
           console.error('Failed to initialize large file:', err);
           setError(`Failed to initialize ${file.name}: ${err.message}`);
         }
-  
+
         continue; // Skip normal processing for this file
       }
-  
+
       // Regular processing for small files
       console.log(`Using regular processing`);
       
@@ -122,9 +116,9 @@ export default function Home() {
         results: null,
         error: null,
       };
-  
+
       setProcessingFiles(prev => [...prev, newFile]);
-  
+
       // Process immediately
       await processFile(newFile);
     }
@@ -226,7 +220,7 @@ export default function Home() {
             Validate US phone numbers and check iOS/iMessage support
           </p>
         </header>
-  
+
         {error && (
           <div style={styles.errorBanner}>
             <span style={styles.errorIcon}>⚠️</span>
@@ -239,8 +233,8 @@ export default function Home() {
             </button>
           </div>
         )}
-  
-        {/* CHUNKED PROCESSOR - Should show when file is initialized */}
+
+        {/* Show chunked processor if large file is being processed */}
         {chunkedProcessing && (
           <div style={styles.chunkedSection}>
             <div style={styles.chunkedHeader}>
@@ -248,7 +242,7 @@ export default function Home() {
                 🚀 Processing Large File: {chunkedProcessing.fileName}
               </h2>
               <button
-                onClick={() => setChunkedProcessing(null)}
+                onClick={handleChunkedCancel}
                 style={styles.cancelButton}
               >
                 Cancel
@@ -273,7 +267,7 @@ export default function Home() {
                 <span style={styles.infoValue}>{chunkedProcessing.estimatedTime}</span>
               </div>
             </div>
-  
+
             <ChunkedProcessor
               fileId={chunkedProcessing.fileId}
               totalRecords={chunkedProcessing.totalRecords}
@@ -282,24 +276,24 @@ export default function Home() {
             />
           </div>
         )}
-  
-        {/* Normal upload interface - Hide when chunked processing */}
-        {!chunkedProcessing && (
-          <>
-            <div style={styles.uploadSection}>
-              <FileUploader
-                onFilesSelected={handleFilesSelected}
-                disabled={processingFiles.some(f => f.status === 'processing')}
-              />
-              <Instructions />
-            </div>
-  
-            {processingFiles.length > 0 && (
-              <ProcessingQueue files={processingFiles} />
-            )}
-          </>
+
+        {/* Normal file upload interface - ALWAYS show */}
+        <div style={styles.uploadSection}>
+          <FileUploader
+            onFilesSelected={handleFilesSelected}
+            disabled={processingFiles.some(f => f.status === 'processing')}
+          />
+          <Instructions />
+        </div>
+
+        {/* Processing queue for small files */}
+        {processingFiles.length > 0 && (
+          <ProcessingQueue files={processingFiles} />
         )}
-  
+
+        {/* Progress Checker - always visible */}
+        <FileProgressChecker />
+
         {/* File history - always visible */}
         <FileHistory />
       </div>
