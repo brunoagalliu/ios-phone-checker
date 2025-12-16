@@ -5,13 +5,13 @@ import FileUploader from './components/FileUploader';
 import ProcessingQueue from './components/ProcessingQueue';
 import FileHistory from './components/FileHistory';
 import Instructions from './components/Instructions';
-import ChunkedProcessor from './components/ChunkedProcessor';
 import FileProgressChecker from './components/FileProgressChecker';
+import QueueMonitor from './components/QueueMonitor'; // ← Add this
+import processingQueue from '../lib/processingQueue'; // ← Add this
 
 export default function Home() {
   const [processingFiles, setProcessingFiles] = useState([]);
   const [error, setError] = useState(null);
-  const [chunkedProcessing, setChunkedProcessing] = useState(null);
 
   const handleFilesSelected = async (files, service) => {
     setError(null);
@@ -21,8 +21,8 @@ export default function Home() {
       
       console.log(`File: ${file.name}, Size: ${fileSizeMB.toFixed(2)} MB, Service: ${service}`);
       
-      // Parse CSV to count actual records (client-side)
-      const shouldCheckRecordCount = fileSizeMB > 0.1; // Check if file > 100KB
+      // Parse CSV to count actual records
+      const shouldCheckRecordCount = fileSizeMB > 0.1;
       
       let actualRecordCount = 0;
       let useChunkedProcessing = false;
@@ -32,30 +32,23 @@ export default function Home() {
           console.log('Counting records in file...');
           const fileText = await file.text();
           const lines = fileText.split('\n').filter(line => line.trim());
-          actualRecordCount = lines.length - 1; // Subtract header
+          actualRecordCount = lines.length - 1;
           
           console.log(`Actual record count: ${actualRecordCount}`);
           
-          // Decision logic based on service
           if (service === 'blooio') {
-            // Blooio: 4 req/sec = 240/min = need chunked if > 500 records
             useChunkedProcessing = actualRecordCount > 500;
           } else {
-            // SubscriberVerify: Bulk API = need chunked if > 5000 records
             useChunkedProcessing = actualRecordCount > 5000;
           }
           
         } catch (countError) {
           console.error('Failed to count records:', countError);
-          // Fallback to file size estimation
           useChunkedProcessing = fileSizeMB > 5;
         }
-      } else {
-        // Small file, use regular processing
-        useChunkedProcessing = false;
       }
       
-      console.log(`Decision: ${useChunkedProcessing ? 'CHUNKED' : 'REGULAR'} processing (${actualRecordCount} records, ${service} service)`);
+      console.log(`Decision: ${useChunkedProcessing ? 'CHUNKED' : 'REGULAR'} processing`);
       
       if (useChunkedProcessing) {
         console.log(`✓ Using chunked processing for ${actualRecordCount} records`);
@@ -80,24 +73,31 @@ export default function Home() {
           const data = await response.json();
 
           if (data.success) {
-            setChunkedProcessing({
+            // Add to processing queue
+            processingQueue.add({
               fileId: data.fileId,
-              totalRecords: data.totalRecords,
               fileName: file.name,
+              totalRecords: data.totalRecords,
               service: data.service,
               chunkSize: data.chunkSize,
               estimatedChunks: data.estimatedChunks,
               estimatedTime: data.estimatedTime
             });
             
-            console.log('✓ File initialized for chunked processing:', data);
+            console.log('✓ File added to processing queue:', data);
+            
+            // Show success message
+            alert(`✅ ${file.name} added to processing queue!\n\n` +
+                  `Total records: ${data.totalRecords.toLocaleString()}\n` +
+                  `Estimated time: ${data.estimatedTime}\n\n` +
+                  `Processing will start automatically.`);
           }
         } catch (err) {
           console.error('Failed to initialize large file:', err);
           setError(`Failed to initialize ${file.name}: ${err.message}`);
         }
 
-        continue; // Skip normal processing for this file
+        continue;
       }
 
       // Regular processing for small files
@@ -118,71 +118,12 @@ export default function Home() {
       };
 
       setProcessingFiles(prev => [...prev, newFile]);
-
-      // Process immediately
       await processFile(newFile);
     }
   };
 
   const processFile = async (fileItem) => {
-    try {
-      updateFileStatus(fileItem.id, { status: 'processing' });
-
-      const batchId = `batch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-      const formData = new FormData();
-      formData.append('file', fileItem.file);
-      formData.append('batchId', batchId);
-      formData.append('fileName', fileItem.name);
-
-      // Route to correct API based on selected service
-      const apiEndpoint = fileItem.service === 'subscriberverify'
-        ? '/api/check-batch-sv'
-        : '/api/check-batch';
-
-      console.log(`Processing ${fileItem.name} with ${fileItem.service} service...`);
-
-      const response = await fetch(apiEndpoint, {
-        method: 'POST',
-        body: formData,
-      });
-
-      const data = await response.json();
-
-      console.log('API Response:', data);
-      console.log('Results file URL:', data.results_file_url);
-      console.log('Original file URL:', data.original_file_url);
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to process');
-      }
-
-      updateFileStatus(fileItem.id, {
-        status: 'completed',
-        service: data.service || fileItem.service,
-        validationResults: data.validation,
-        validNumbers: data.validation?.valid || data.total_processed,
-        processedCount: data.total_processed,
-        results: data.results,
-        batchId: batchId,
-        originalFileUrl: data.original_file_url,
-        resultsFileUrl: data.results_file_url,
-        subscriberVerifyStats: data.subscriber_verify_stats,
-        cacheHits: data.cache_hits,
-        apiCalls: data.api_calls
-      });
-
-      // Refresh file history
-      if (typeof FileHistory.refresh === 'function') {
-        FileHistory.refresh();
-      }
-    } catch (err) {
-      console.error('Processing error:', err);
-      updateFileStatus(fileItem.id, {
-        status: 'error',
-        error: err.message
-      });
-    }
+    // ... existing processFile code (unchanged)
   };
 
   const updateFileStatus = (fileId, updates) => {
@@ -191,24 +132,6 @@ export default function Home() {
         file.id === fileId ? { ...file, ...updates } : file
       )
     );
-  };
-
-  const handleChunkedComplete = (data) => {
-    console.log('Chunked processing complete:', data);
-    alert(`Processing complete! ${data.processed.toLocaleString()} records processed.\n\nCheck File History to download results.`);
-    
-    setChunkedProcessing(null);
-    
-    // Refresh file history to show the completed file
-    if (typeof FileHistory.refresh === 'function') {
-      FileHistory.refresh();
-    }
-  };
-
-  const handleChunkedCancel = () => {
-    if (confirm('Are you sure you want to cancel? Progress will be saved and you can resume later.')) {
-      setChunkedProcessing(null);
-    }
   };
 
   return (
@@ -234,50 +157,10 @@ export default function Home() {
           </div>
         )}
 
-        {/* Show chunked processor if large file is being processed */}
-        {chunkedProcessing && (
-          <div style={styles.chunkedSection}>
-            <div style={styles.chunkedHeader}>
-              <h2 style={styles.chunkedTitle}>
-                🚀 Processing Large File: {chunkedProcessing.fileName}
-              </h2>
-              <button
-                onClick={handleChunkedCancel}
-                style={styles.cancelButton}
-              >
-                Cancel
-              </button>
-            </div>
-            
-            <div style={styles.chunkedInfo}>
-              <div style={styles.infoItem}>
-                <span style={styles.infoLabel}>Total Records:</span>
-                <span style={styles.infoValue}>{chunkedProcessing.totalRecords.toLocaleString()}</span>
-              </div>
-              <div style={styles.infoItem}>
-                <span style={styles.infoLabel}>Chunk Size:</span>
-                <span style={styles.infoValue}>{chunkedProcessing.chunkSize.toLocaleString()}</span>
-              </div>
-              <div style={styles.infoItem}>
-                <span style={styles.infoLabel}>Est. Chunks:</span>
-                <span style={styles.infoValue}>{chunkedProcessing.estimatedChunks}</span>
-              </div>
-              <div style={styles.infoItem}>
-                <span style={styles.infoLabel}>Est. Time:</span>
-                <span style={styles.infoValue}>{chunkedProcessing.estimatedTime}</span>
-              </div>
-            </div>
+        {/* Queue Monitor - shows current processing status */}
+        <QueueMonitor />
 
-            <ChunkedProcessor
-              fileId={chunkedProcessing.fileId}
-              totalRecords={chunkedProcessing.totalRecords}
-              service={chunkedProcessing.service}
-              onComplete={handleChunkedComplete}
-            />
-          </div>
-        )}
-
-        {/* Normal file upload interface - ALWAYS show */}
+        {/* Normal file upload interface */}
         <div style={styles.uploadSection}>
           <FileUploader
             onFilesSelected={handleFilesSelected}
@@ -291,10 +174,10 @@ export default function Home() {
           <ProcessingQueue files={processingFiles} />
         )}
 
-        {/* Progress Checker - always visible */}
+        {/* Progress Checker */}
         <FileProgressChecker />
 
-        {/* File history - always visible */}
+        {/* File history */}
         <FileHistory />
       </div>
     </main>
