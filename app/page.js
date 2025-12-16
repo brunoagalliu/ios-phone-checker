@@ -6,8 +6,9 @@ import ProcessingQueue from './components/ProcessingQueue';
 import FileHistory from './components/FileHistory';
 import Instructions from './components/Instructions';
 import FileProgressChecker from './components/FileProgressChecker';
-import QueueMonitor from './components/QueueMonitor'; // ← Add this
-import processingQueue from '../lib/processingQueue'; // ← Add this
+import QueueMonitor from './components/QueueMonitor';
+import processingQueue from '../lib/processingQueue';
+import ActiveFiles from './components/ActiveFiles';
 
 export default function Home() {
   const [processingFiles, setProcessingFiles] = useState([]);
@@ -159,6 +160,9 @@ export default function Home() {
 
         {/* Queue Monitor - shows current processing status */}
         <QueueMonitor />
+
+        {/* Active Files Dashboard */}
+        <ActiveFiles />
 
         {/* Normal file upload interface */}
         <div style={styles.uploadSection}>

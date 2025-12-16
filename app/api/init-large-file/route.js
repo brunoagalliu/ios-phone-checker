@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { saveUploadedFile } from '../../../lib/db.js';
+import { saveUploadedFile, addToQueue } from '../../../lib/db.js';
 import { uploadFile } from '../../../lib/blobStorage.js';
 import { processPhoneArray } from '../../../lib/phoneValidator.js';
 import Papa from 'papaparse';
@@ -97,7 +97,10 @@ export async function POST(request) {
       original_file_size: originalFileBlob.size
     });
     
-    console.log(`File initialized with ID: ${fileId}`);
+    //console.log(`File initialized with ID: ${fileId}`);
+    console.log(`✓ File saved with ID: ${fileId}`);
+    await addToQueue(fileId, 0);
+    console.log('=== INIT COMPLETE ===');
     
     return NextResponse.json({
       success: true,
