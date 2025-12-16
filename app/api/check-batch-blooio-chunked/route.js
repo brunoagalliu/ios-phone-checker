@@ -3,9 +3,11 @@ import { getConnection } from '../../../lib/db.js';
 import { checkBlooioSingle, blooioRateLimiter } from '../../../lib/blooioClient.js';
 import { savePhoneCheckWithFile } from '../../../lib/db.js';
 
-export const maxDuration = 300; // 5 minutes for Pro plan
+export const maxDuration = 300;
 
-const CHUNK_SIZE = 1000; // Process 1000 records per chunk
+const CHUNK_SIZE = 400;
+const MAX_PROCESSING_TIME = 270000; // 4.5 minutes
+const MAX_RETRIES = 3; // Retry failed API calls up to 3 times
 
 export async function POST(request) {
   let connection;
@@ -18,6 +20,7 @@ export async function POST(request) {
     }
     
     const startOffset = resumeFrom || 0;
+    const chunkStartTime = Date.now();
     
     console.log(`\n=== Processing Blooio File ${fileId} from offset ${startOffset} ===`);
     
@@ -35,15 +38,13 @@ export async function POST(request) {
     
     const file = files[0];
     
-    // Check if file has processing state
     if (!file.processing_state) {
       console.error('No processing_state found in file record');
       return NextResponse.json({ 
-        error: 'File not initialized for chunked processing. Please re-upload the file through the chunked processor.' 
+        error: 'File not initialized for chunked processing. Please re-upload the file.' 
       }, { status: 400 });
     }
     
-    // Parse processing state
     let processingState;
     try {
       processingState = JSON.parse(file.processing_state);
@@ -107,15 +108,14 @@ export async function POST(request) {
     const uncachedPhones = [];
     let cacheHits = 0;
     let apiCalls = 0;
+    let failedNumbers = [];
     
     console.log('\n--- STEP 1: Checking cache for all phones (BATCH QUERY) ---');
     
     const cacheStart = Date.now();
-    
-    // Build list of phone numbers to check
     const phoneNumbers = chunk.map(p => p.e164);
     
-    // Batch cache lookup - single query instead of 1000 individual queries!
+    // Batch cache lookup
     const placeholders = phoneNumbers.map(() => '?').join(',');
     const [cachedRows] = await connection.execute(
       `SELECT * FROM phone_checks 
@@ -127,7 +127,7 @@ export async function POST(request) {
     const cacheDuration = Date.now() - cacheStart;
     console.log(`✓ Cache batch query completed in ${cacheDuration}ms for ${phoneNumbers.length} phones`);
     
-    // Create a Map for O(1) lookup performance
+    // Create Map for O(1) lookup
     const cacheMap = new Map();
     cachedRows.forEach(row => {
       cacheMap.set(row.phone_number, {
@@ -158,7 +158,6 @@ export async function POST(request) {
           cache_age_days: cached.cache_age_days
         });
       } else {
-        // Need to check via API
         uncachedPhones.push(phone);
       }
     }
@@ -166,22 +165,71 @@ export async function POST(request) {
     console.log(`✓ Cache hits: ${cacheHits} phones (instant retrieval)`);
     console.log(`✓ Need API calls: ${uncachedPhones.length} phones`);
     
-    // STEP 2: Process uncached phones with rate limiting
+    // STEP 2: Process uncached phones with rate limiting AND retry logic
     if (uncachedPhones.length > 0) {
       console.log(`\n--- STEP 2: Processing ${uncachedPhones.length} uncached phones with rate limiting (4/sec) ---`);
       
       const apiStartTime = Date.now();
       
       for (let i = 0; i < uncachedPhones.length; i++) {
+        // Check timeout before processing each number
+        const elapsedTime = Date.now() - chunkStartTime;
+        if (elapsedTime > MAX_PROCESSING_TIME) {
+          console.warn(`⚠️ Approaching timeout at ${elapsedTime}ms`);
+          console.warn(`   Processed ${apiCalls}/${uncachedPhones.length} API calls`);
+          console.warn(`   Stopping early to save progress before timeout`);
+          
+          // Save partial progress
+          const partialOffset = startOffset + cacheHits + apiCalls;
+          console.log(`   Partial progress saved at offset ${partialOffset}`);
+          
+          break; // Exit loop and save what we have
+        }
+        
         const phone = uncachedPhones[i];
         
-        // ✅ Rate limit ONLY for API calls (250ms between calls = 4 requests/second)
+        // Rate limit
         await blooioRateLimiter.acquire();
         
-        try {
-          const result = await checkBlooioSingle(phone.e164);
-          apiCalls++;
-          
+        // Retry logic for API calls
+        let apiSuccess = false;
+        let result = null;
+        let lastError = null;
+        
+        for (let retryAttempt = 0; retryAttempt <= MAX_RETRIES; retryAttempt++) {
+          try {
+            if (retryAttempt > 0) {
+              console.log(`  🔄 Retry ${retryAttempt}/${MAX_RETRIES} for ${phone.e164}`);
+              // Exponential backoff: 1s, 2s, 4s
+              const backoffMs = Math.pow(2, retryAttempt - 1) * 1000;
+              await new Promise(resolve => setTimeout(resolve, backoffMs));
+            }
+            
+            result = await checkBlooioSingle(phone.e164);
+            
+            // Check if result has an error
+            if (result.error && retryAttempt < MAX_RETRIES) {
+              lastError = result.error;
+              console.log(`  ⚠️ API returned error: ${result.error}, will retry`);
+              continue; // Retry
+            }
+            
+            apiSuccess = true;
+            apiCalls++;
+            break; // Success - exit retry loop
+            
+          } catch (error) {
+            lastError = error.message;
+            console.error(`  ❌ Attempt ${retryAttempt + 1} failed for ${phone.e164}:`, error.message);
+            
+            if (retryAttempt === MAX_RETRIES) {
+              console.error(`  ❌ Max retries reached for ${phone.e164}, marking as failed`);
+            }
+          }
+        }
+        
+        if (apiSuccess && result) {
+          // Success - add to results
           chunkResults.push({
             phone_number: phone.original,
             e164: phone.e164,
@@ -194,28 +242,45 @@ export async function POST(request) {
             from_cache: false
           });
           
-          // Save to cache for future use
-          await savePhoneCheckWithFile({
-            phone_number: phone.e164,
-            is_ios: result.is_ios,
-            supports_imessage: result.supports_imessage,
-            supports_sms: result.supports_sms,
-            contact_type: result.contact_type,
-            contact_id: result.contact_id,
-            error: result.error,
-            batch_id: batchId,
-            source: 'blooio'
-          }, fileId);
-          
-          // Log progress every 50 API calls
-          if (apiCalls % 50 === 0) {
-            const progressPct = ((apiCalls / uncachedPhones.length) * 100).toFixed(1);
-            const elapsed = ((Date.now() - apiStartTime) / 1000).toFixed(1);
-            console.log(`  API progress: ${apiCalls}/${uncachedPhones.length} (${progressPct}%) - ${elapsed}s elapsed`);
+          // Save to cache
+          try {
+            await savePhoneCheckWithFile({
+              phone_number: phone.e164,
+              is_ios: result.is_ios,
+              supports_imessage: result.supports_imessage,
+              supports_sms: result.supports_sms,
+              contact_type: result.contact_type,
+              contact_id: result.contact_id,
+              error: result.error,
+              batch_id: batchId,
+              source: 'blooio'
+            }, fileId);
+          } catch (saveError) {
+            console.error(`  ⚠️ Failed to save to cache: ${saveError.message}`);
           }
           
-        } catch (error) {
-          console.error(`  ❌ Error checking ${phone.e164}:`, error.message);
+        } else {
+          // Failed after all retries - add to retry queue
+          failedNumbers.push(phone.e164);
+          
+          // Add to retry queue for later processing
+          try {
+            await connection.execute(
+              `INSERT INTO retry_queue 
+               (file_id, phone_number, original_format, e164_format, retry_count, last_error, status)
+               VALUES (?, ?, ?, ?, 0, ?, 'queued')
+               ON DUPLICATE KEY UPDATE 
+                 retry_count = retry_count + 1,
+                 last_error = VALUES(last_error),
+                 last_attempt = NOW()`,
+              [fileId, phone.e164, phone.original, phone.e164, lastError]
+            );
+            
+            console.log(`  📋 Added ${phone.e164} to retry queue`);
+          } catch (queueError) {
+            console.error(`  ⚠️ Failed to add to retry queue: ${queueError.message}`);
+          }
+          
           chunkResults.push({
             phone_number: phone.original,
             e164: phone.e164,
@@ -224,24 +289,37 @@ export async function POST(request) {
             supports_sms: false,
             contact_type: null,
             contact_id: null,
-            error: error.message,
-            from_cache: false
+            error: `Failed after ${MAX_RETRIES} retries: ${lastError} (added to retry queue)`,
+            from_cache: false,
+            queued_for_retry: true
           });
+        }
+        
+        // Log progress every 50 API calls
+        if (apiCalls % 50 === 0) {
+          const progressPct = ((apiCalls / uncachedPhones.length) * 100).toFixed(1);
+          const elapsed = ((Date.now() - apiStartTime) / 1000).toFixed(1);
+          console.log(`  API progress: ${apiCalls}/${uncachedPhones.length} (${progressPct}%) - ${elapsed}s elapsed`);
         }
       }
       
       const apiDuration = ((Date.now() - apiStartTime) / 1000).toFixed(1);
-      const avgPerCall = (apiDuration / apiCalls).toFixed(2);
-      console.log(`✓ API calls completed in ${apiDuration}s (${apiCalls} calls, ${avgPerCall}s avg per call)`);
+      console.log(`✓ API processing completed in ${apiDuration}s`);
+      
+      if (failedNumbers.length > 0) {
+        console.warn(`⚠️ ${failedNumbers.length} numbers failed after retries`);
+        console.warn(`   Failed numbers: ${failedNumbers.slice(0, 5).join(', ')}${failedNumbers.length > 5 ? '...' : ''}`);
+      }
     }
     
     console.log(`\n--- CHUNK SUMMARY ---`);
     console.log(`Total processed: ${chunkResults.length} phones`);
     console.log(`Cache hits: ${cacheHits} (instant)`);
     console.log(`API calls: ${apiCalls} (rate limited)`);
+    console.log(`Failed: ${failedNumbers.length}`);
     console.log(`Cache hit rate: ${((cacheHits / chunkResults.length) * 100).toFixed(1)}%`);
     
-    // Save chunk results to database
+    // Save chunk results
     await connection.execute(
       `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, created_at) 
        VALUES (?, ?, ?, NOW())
@@ -252,7 +330,7 @@ export async function POST(request) {
     console.log(`✓ Chunk data saved to processing_chunks table`);
     
     // Update file progress
-    const newOffset = startOffset + chunk.length;
+    const newOffset = startOffset + chunkResults.length;
     const progressPct = ((newOffset / totalRecords) * 100).toFixed(2);
     const isComplete = newOffset >= totalRecords;
     
@@ -260,12 +338,14 @@ export async function POST(request) {
       `UPDATE uploaded_files 
        SET processing_offset = ?,
            processing_progress = ?,
-           processing_status = ?
+           processing_status = ?,
+           last_error = ?
        WHERE id = ?`,
       [
         newOffset,
         progressPct,
         isComplete ? 'completed' : 'processing',
+        failedNumbers.length > 0 ? `${failedNumbers.length} numbers failed` : null,
         fileId
       ]
     );
@@ -273,6 +353,30 @@ export async function POST(request) {
     console.log(`\n--- PROGRESS UPDATE ---`);
     console.log(`Processed: ${newOffset.toLocaleString()}/${totalRecords.toLocaleString()} (${progressPct}%)`);
     console.log(`Status: ${isComplete ? '✅ COMPLETE' : '⏳ PROCESSING'}`);
+    
+    // ✅ AUTO-TRIGGER NEXT CHUNK
+    if (!isComplete) {
+      console.log(`\n🔄 Auto-triggering next chunk (offset: ${newOffset})...`);
+      
+      const baseUrl = process.env.VERCEL_URL 
+        ? `https://${process.env.VERCEL_URL}` 
+        : 'https://ios.trackthisclicks.com';
+      
+      // Fire and forget - don't wait for response
+      fetch(`${baseUrl}/api/check-batch-blooio-chunked`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          fileId: fileId, 
+          resumeFrom: newOffset 
+        })
+      }).catch(err => {
+        console.error('❌ Failed to auto-trigger next chunk:', err.message);
+      });
+      
+      console.log('✓ Next chunk triggered');
+    }
+    
     console.log('=== Chunk Complete ===\n');
     
     return NextResponse.json({
@@ -283,11 +387,12 @@ export async function POST(request) {
       isComplete: isComplete,
       cacheHits: cacheHits,
       apiCalls: apiCalls,
-      chunkSize: chunk.length,
-      cacheHitRate: parseFloat(((cacheHits / chunk.length) * 100).toFixed(1)),
+      failedCount: failedNumbers.length,
+      chunkSize: chunkResults.length,
+      cacheHitRate: parseFloat(((cacheHits / chunkResults.length) * 100).toFixed(1)),
       message: isComplete 
-        ? `✅ All ${totalRecords.toLocaleString()} records processed successfully` 
-        : `Processed ${chunk.length} records, ${(totalRecords - newOffset).toLocaleString()} remaining`
+        ? `✅ All ${totalRecords.toLocaleString()} records processed` 
+        : `Processed ${chunkResults.length} records, ${(totalRecords - newOffset).toLocaleString()} remaining`
     });
     
   } catch (error) {
