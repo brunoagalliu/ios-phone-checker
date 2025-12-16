@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getConnection } from '../../../lib/db.js';
 import { checkBlooioSingle, blooioRateLimiter } from '../../../lib/blooioClient.js';
-import { getCachedPhoneCheck, savePhoneCheckWithFile } from '../../../lib/db.js';
+import { savePhoneCheckWithFile } from '../../../lib/db.js';
 
 export const maxDuration = 300; // 5 minutes for Pro plan
 
@@ -108,14 +108,40 @@ export async function POST(request) {
     let cacheHits = 0;
     let apiCalls = 0;
     
-    console.log('\n--- STEP 1: Checking cache for all phones (NO rate limiting) ---');
+    console.log('\n--- STEP 1: Checking cache for all phones (BATCH QUERY) ---');
     
-    // STEP 1: Check cache for ALL phones first (NO rate limiting)
-    for (let i = 0; i < chunk.length; i++) {
-      const phone = chunk[i];
-      
-      // Check if this phone was already checked within last 6 months
-      const cached = await getCachedPhoneCheck(phone.e164);
+    const cacheStart = Date.now();
+    
+    // Build list of phone numbers to check
+    const phoneNumbers = chunk.map(p => p.e164);
+    
+    // Batch cache lookup - single query instead of 1000 individual queries!
+    const placeholders = phoneNumbers.map(() => '?').join(',');
+    const [cachedRows] = await connection.execute(
+      `SELECT * FROM phone_checks 
+       WHERE phone_number IN (${placeholders})
+       AND last_checked >= DATE_SUB(NOW(), INTERVAL 6 MONTH)`,
+      phoneNumbers
+    );
+    
+    const cacheDuration = Date.now() - cacheStart;
+    console.log(`✓ Cache batch query completed in ${cacheDuration}ms for ${phoneNumbers.length} phones`);
+    
+    // Create a Map for O(1) lookup performance
+    const cacheMap = new Map();
+    cachedRows.forEach(row => {
+      cacheMap.set(row.phone_number, {
+        ...row,
+        from_cache: true,
+        cache_age_days: Math.floor((Date.now() - new Date(row.last_checked).getTime()) / (1000 * 60 * 60 * 24))
+      });
+    });
+    
+    console.log(`✓ Found ${cacheMap.size} cached records in database`);
+    
+    // Process chunk using cache map
+    for (const phone of chunk) {
+      const cached = cacheMap.get(phone.e164);
       
       if (cached) {
         cacheHits++;
@@ -137,8 +163,8 @@ export async function POST(request) {
       }
     }
     
-    console.log(`✓ Cache hits: ${cacheHits} (instant)`);
-    console.log(`✓ Need API calls: ${uncachedPhones.length}`);
+    console.log(`✓ Cache hits: ${cacheHits} phones (instant retrieval)`);
+    console.log(`✓ Need API calls: ${uncachedPhones.length} phones`);
     
     // STEP 2: Process uncached phones with rate limiting
     if (uncachedPhones.length > 0) {
@@ -149,7 +175,7 @@ export async function POST(request) {
       for (let i = 0; i < uncachedPhones.length; i++) {
         const phone = uncachedPhones[i];
         
-        // ✅ Rate limit ONLY for API calls (250ms between calls = 4/sec)
+        // ✅ Rate limit ONLY for API calls (250ms between calls = 4 requests/second)
         await blooioRateLimiter.acquire();
         
         try {
@@ -183,11 +209,13 @@ export async function POST(request) {
           
           // Log progress every 50 API calls
           if (apiCalls % 50 === 0) {
-            console.log(`  API progress: ${apiCalls}/${uncachedPhones.length} (${((apiCalls/uncachedPhones.length)*100).toFixed(1)}%)`);
+            const progressPct = ((apiCalls / uncachedPhones.length) * 100).toFixed(1);
+            const elapsed = ((Date.now() - apiStartTime) / 1000).toFixed(1);
+            console.log(`  API progress: ${apiCalls}/${uncachedPhones.length} (${progressPct}%) - ${elapsed}s elapsed`);
           }
           
         } catch (error) {
-          console.error(`  Error checking ${phone.e164}:`, error.message);
+          console.error(`  ❌ Error checking ${phone.e164}:`, error.message);
           chunkResults.push({
             phone_number: phone.original,
             e164: phone.e164,
@@ -203,13 +231,15 @@ export async function POST(request) {
       }
       
       const apiDuration = ((Date.now() - apiStartTime) / 1000).toFixed(1);
-      console.log(`✓ API calls completed in ${apiDuration}s (${apiCalls} calls)`);
+      const avgPerCall = (apiDuration / apiCalls).toFixed(2);
+      console.log(`✓ API calls completed in ${apiDuration}s (${apiCalls} calls, ${avgPerCall}s avg per call)`);
     }
     
     console.log(`\n--- CHUNK SUMMARY ---`);
     console.log(`Total processed: ${chunkResults.length} phones`);
     console.log(`Cache hits: ${cacheHits} (instant)`);
     console.log(`API calls: ${apiCalls} (rate limited)`);
+    console.log(`Cache hit rate: ${((cacheHits / chunkResults.length) * 100).toFixed(1)}%`);
     
     // Save chunk results to database
     await connection.execute(
@@ -219,7 +249,7 @@ export async function POST(request) {
       [fileId, startOffset, JSON.stringify(chunkResults)]
     );
     
-    console.log(`✓ Chunk data saved to database`);
+    console.log(`✓ Chunk data saved to processing_chunks table`);
     
     // Update file progress
     const newOffset = startOffset + chunk.length;
@@ -240,9 +270,9 @@ export async function POST(request) {
       ]
     );
     
-    console.log(`\n--- PROGRESS ---`);
-    console.log(`Processed: ${newOffset}/${totalRecords} (${progressPct}%)`);
-    console.log(`Status: ${isComplete ? 'COMPLETE' : 'PROCESSING'}`);
+    console.log(`\n--- PROGRESS UPDATE ---`);
+    console.log(`Processed: ${newOffset.toLocaleString()}/${totalRecords.toLocaleString()} (${progressPct}%)`);
+    console.log(`Status: ${isComplete ? '✅ COMPLETE' : '⏳ PROCESSING'}`);
     console.log('=== Chunk Complete ===\n');
     
     return NextResponse.json({
@@ -254,16 +284,17 @@ export async function POST(request) {
       cacheHits: cacheHits,
       apiCalls: apiCalls,
       chunkSize: chunk.length,
+      cacheHitRate: parseFloat(((cacheHits / chunk.length) * 100).toFixed(1)),
       message: isComplete 
-        ? 'All records processed successfully' 
-        : `Processed ${chunk.length} records, ${totalRecords - newOffset} remaining`
+        ? `✅ All ${totalRecords.toLocaleString()} records processed successfully` 
+        : `Processed ${chunk.length} records, ${(totalRecords - newOffset).toLocaleString()} remaining`
     });
     
   } catch (error) {
-    console.error('\n=== CHUNKED PROCESSING ERROR ===');
+    console.error('\n=== ❌ CHUNKED PROCESSING ERROR ===');
     console.error('Error:', error.message);
     console.error('Stack:', error.stack);
-    console.error('================================\n');
+    console.error('====================================\n');
     
     return NextResponse.json({
       success: false,
