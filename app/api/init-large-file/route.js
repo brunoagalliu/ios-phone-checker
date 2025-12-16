@@ -11,11 +11,17 @@ export async function POST(request) {
     const fileName = formData.get('fileName');
     const service = formData.get('service');
     
+    if (!file) {
+      return NextResponse.json({ error: 'File is required' }, { status: 400 });
+    }
+    
     console.log(`Initializing large file: ${fileName} for ${service} service`);
     
     // Upload original
     const fileBuffer = Buffer.from(await file.arrayBuffer());
     const originalFileBlob = await uploadFile(fileBuffer, fileName, 'originals');
+    
+    console.log(`Uploaded to blob: ${originalFileBlob.url}`);
     
     // Parse and validate
     const fileText = await file.text();
@@ -40,8 +46,12 @@ export async function POST(request) {
       );
     }
     
+    console.log(`Found ${phones.length} phone numbers`);
+    
     const validationResult = processPhoneArray(phones);
     const batchId = `batch_${Date.now()}`;
+    
+    console.log(`Validated: ${validationResult.stats.valid} valid numbers`);
     
     // Store processing state
     const processingState = JSON.stringify({
@@ -51,17 +61,20 @@ export async function POST(request) {
       service: service
     });
     
+    const stateSizeKB = (processingState.length / 1024).toFixed(2);
+    console.log(`Processing state size: ${stateSizeKB} KB`);
+    
     // Calculate chunk size and estimated time based on service
     let chunkSize, estimatedChunks, estimatedTimeMinutes;
     
     if (service === 'blooio') {
-      chunkSize = 200; // 200 per chunk (4 req/sec * 50 sec)
+      chunkSize = 200;
       estimatedChunks = Math.ceil(validationResult.stats.valid / chunkSize);
-      estimatedTimeMinutes = Math.ceil(estimatedChunks * 1); // ~1 min per chunk
+      estimatedTimeMinutes = Math.ceil(estimatedChunks * 1);
     } else {
-      chunkSize = 5000; // 5000 per chunk for SubscriberVerify
+      chunkSize = 5000;
       estimatedChunks = Math.ceil(validationResult.stats.valid / chunkSize);
-      estimatedTimeMinutes = Math.ceil(estimatedChunks * 0.25); // ~15 sec per chunk
+      estimatedTimeMinutes = Math.ceil(estimatedChunks * 0.25);
     }
     
     // Save to database
@@ -84,7 +97,7 @@ export async function POST(request) {
       original_file_size: originalFileBlob.size
     });
     
-    console.log(`File initialized with ID: ${fileId}, service: ${service}`);
+    console.log(`File initialized with ID: ${fileId}`);
     
     return NextResponse.json({
       success: true,
@@ -98,7 +111,10 @@ export async function POST(request) {
     
   } catch (error) {
     console.error('Init large file error:', error);
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ 
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    }, { status: 500 });
   }
 }
 

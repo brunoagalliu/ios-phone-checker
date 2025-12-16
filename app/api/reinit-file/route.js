@@ -11,11 +11,10 @@ export async function POST(request) {
       return NextResponse.json({ error: 'File ID required' }, { status: 400 });
     }
     
-    console.log(`Reinitializing file ${fileId} for chunked processing...`);
+    console.log(`Reinitializing file ${fileId}...`);
     
     const connection = await getConnection();
     
-    // Get file
     const [files] = await connection.execute(
       'SELECT * FROM uploaded_files WHERE id = ?',
       [fileId]
@@ -26,89 +25,36 @@ export async function POST(request) {
     }
     
     const file = files[0];
-    console.log('File found:', file.file_name);
     
-    // Download original file from blob
     if (!file.original_file_url) {
       return NextResponse.json({ 
         error: 'No original file URL. File must be re-uploaded.' 
       }, { status: 400 });
     }
     
-    console.log('Downloading original file from:', file.original_file_url);
-    
+    console.log('Downloading file from blob...');
     const response = await fetch(file.original_file_url);
-    if (!response.ok) {
-      throw new Error(`Failed to download file: ${response.status}`);
-    }
-    
     const fileText = await response.text();
-    console.log(`Downloaded ${fileText.length} bytes`);
     
-    // Parse CSV
     const parseResult = Papa.parse(fileText, { 
       header: true, 
       skipEmptyLines: true 
     });
     
-    console.log(`Parsed ${parseResult.data.length} rows`);
-    
-    // Find phone column
     const phoneColumn = findPhoneColumn(parseResult.data);
-    if (!phoneColumn) {
-      return NextResponse.json({ 
-        error: 'Could not find phone column' 
-      }, { status: 400 });
-    }
-    
-    console.log(`Using phone column: ${phoneColumn}`);
-    
-    // Extract phones
     const phones = parseResult.data
       .map(row => row[phoneColumn])
       .filter(phone => phone && phone.toString().trim());
     
-    console.log(`Extracted ${phones.length} phone numbers`);
-    
-    // Validate
     const validationResult = processPhoneArray(phones);
     
-    console.log('Validation results:', {
-      total: validationResult.stats.total,
-      valid: validationResult.stats.valid,
-      invalid: validationResult.stats.invalid
-    });
-    
-    // Determine service - default to blooio, or check if it was SV
-    let service = 'blooio';
-    
-    // Check if there are any SV-specific columns in the results
-    const [existingChecks] = await connection.execute(
-      'SELECT * FROM phone_checks WHERE batch_id = ? LIMIT 1',
-      [file.batch_id]
-    );
-    
-    if (existingChecks.length > 0) {
-      // Check if this looks like a blooio result
-      const check = existingChecks[0];
-      if (check.contact_id !== null || check.contact_type !== null) {
-        service = 'blooio';
-        console.log('Detected Blooio service from existing checks');
-      } else {
-        service = 'subscriberverify';
-        console.log('Detected SubscriberVerify service from existing checks');
-      }
-    }
-    
-    // Create processing state
     const processingState = JSON.stringify({
       validPhones: validationResult.valid,
       batchId: file.batch_id,
       fileName: file.original_name,
-      service: service
+      service: 'blooio'
     });
     
-    // Update file for chunked processing
     await connection.execute(
       `UPDATE uploaded_files 
        SET processing_state = ?,
@@ -121,23 +67,21 @@ export async function POST(request) {
       [processingState, validationResult.stats.valid, fileId]
     );
     
-    console.log(`✓ File ${fileId} reinitialized for chunked processing (${service})`);
+    console.log(`File ${fileId} reinitialized`);
     
     return NextResponse.json({
       success: true,
       fileId: fileId,
-      service: service,
+      service: 'blooio',
       totalRecords: validationResult.stats.valid,
-      chunkSize: service === 'blooio' ? 200 : 5000,
-      estimatedChunks: Math.ceil(validationResult.stats.valid / (service === 'blooio' ? 200 : 5000)),
-      message: `File reinitialized for ${service} chunked processing. You can now use the chunked processor.`
+      chunkSize: 200,
+      estimatedChunks: Math.ceil(validationResult.stats.valid / 200)
     });
     
   } catch (error) {
     console.error('Reinit error:', error);
     return NextResponse.json({ 
-      error: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      error: error.message 
     }, { status: 500 });
   }
 }
@@ -145,7 +89,7 @@ export async function POST(request) {
 function findPhoneColumn(data) {
   if (!data || data.length === 0) return null;
   const firstRow = data[0];
-  const possibleColumns = ['phone', 'phone_number', 'phonenumber', 'mobile', 'number', 'cell', 'telephone'];
+  const possibleColumns = ['phone', 'phone_number', 'phonenumber', 'mobile', 'number'];
   
   for (const col of Object.keys(firstRow)) {
     if (possibleColumns.includes(col.toLowerCase().trim())) {
