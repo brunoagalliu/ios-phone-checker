@@ -6,7 +6,7 @@ import { getSubscriberVerifyCacheBatch, saveSubscriberVerifyCacheBatch } from '.
 import { uploadFile } from '../../../lib/blobStorage.js';
 import Papa from 'papaparse';
 
-export const maxDuration = 60; // Maximum Vercel allows
+export const maxDuration = 300; // Maximum Vercel allows
 
 const CHUNK_SIZE = 5000; // Process 5000 records per request
 const MAX_PROCESSING_TIME = 50000; // Stop after 50 seconds to avoid timeout

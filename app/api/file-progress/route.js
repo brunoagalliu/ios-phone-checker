@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 import { getConnection } from '../../../lib/db.js';
 
+export const maxDuration = 10;
+
 export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);

@@ -11,6 +11,7 @@ import { uploadFile } from '../../../lib/blobStorage.js';
 import { getBlooioCacheBatch, saveBlooioCacheBatch } from '../../../lib/phoneCache.js';
 import Papa from 'papaparse';
 
+export const maxDuration = 300;
 const BLOOIO_API_URL = 'https://backend.blooio.com/v1/api/contacts';
 
 async function checkSingleNumberWithAPI(phoneNumber, batchId) {

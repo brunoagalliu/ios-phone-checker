@@ -5,7 +5,7 @@ import { getBlooioCacheBatch, saveBlooioCacheBatch } from '../../../lib/phoneCac
 import blooioRateLimiter from '../../../lib/rateLimiter.js';
 import Papa from 'papaparse';
 
-export const maxDuration = 60; // Maximum Vercel allows
+export const maxDuration = 300; // Maximum Vercel allows
 
 const CHUNK_SIZE = 200; // Only 200 per chunk because of 4 req/sec rate limit
 const BLOOIO_API_URL = 'https://backend.blooio.com/v1/api/contacts';

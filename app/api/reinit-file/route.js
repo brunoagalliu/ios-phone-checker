@@ -3,6 +3,8 @@ import { getConnection } from '../../../lib/db.js';
 import { processPhoneArray } from '../../../lib/phoneValidator.js';
 import Papa from 'papaparse';
 
+export const maxDuration = 60;
+
 export async function POST(request) {
   try {
     const { fileId } = await request.json();
