@@ -3,9 +3,9 @@ import { getConnection } from '../../../lib/db.js';
 import { checkBlooioSingle, blooioRateLimiter } from '../../../lib/blooioClient.js';
 import { getCachedPhoneCheck, savePhoneCheckWithFile } from '../../../lib/db.js';
 
-export const maxDuration = 300;
+export const maxDuration = 300; // 5 minutes for Pro plan
 
-const CHUNK_SIZE = 1000;
+const CHUNK_SIZE = 1000; // Process 1000 records per chunk
 
 export async function POST(request) {
   let connection;
@@ -19,11 +19,11 @@ export async function POST(request) {
     
     const startOffset = resumeFrom || 0;
     
-    console.log(`\n=== Processing File ${fileId} from offset ${startOffset} ===`);
+    console.log(`\n=== Processing Blooio File ${fileId} from offset ${startOffset} ===`);
     
     connection = await getConnection();
     
-    // Get file info
+    // Get file info with processing state
     const [files] = await connection.execute(
       'SELECT * FROM uploaded_files WHERE id = ?',
       [fileId]
@@ -35,7 +35,9 @@ export async function POST(request) {
     
     const file = files[0];
     
+    // Check if file has processing state
     if (!file.processing_state) {
+      console.error('No processing_state found in file record');
       return NextResponse.json({ 
         error: 'File not initialized for chunked processing. Please re-upload the file through the chunked processor.' 
       }, { status: 400 });
@@ -52,26 +54,48 @@ export async function POST(request) {
       }, { status: 400 });
     }
     
-    const { validPhones, batchId } = processingState;
+    const { validPhones, batchId, fileName, service } = processingState;
+    
+    if (!validPhones || !Array.isArray(validPhones)) {
+      console.error('validPhones not found or not an array');
+      return NextResponse.json({ 
+        error: 'Invalid processing state: validPhones missing' 
+      }, { status: 400 });
+    }
+    
     const totalRecords = validPhones.length;
     
-    console.log(`Total records: ${totalRecords}, Starting from: ${startOffset}`);
+    console.log(`File: ${fileName}`);
+    console.log(`Total records: ${totalRecords}`);
+    console.log(`Starting from: ${startOffset}`);
+    console.log(`Chunk size: ${CHUNK_SIZE}`);
     
-    // Get chunk
+    // Get chunk of phones to process
     const chunk = validPhones.slice(startOffset, startOffset + CHUNK_SIZE);
     console.log(`Processing chunk: ${chunk.length} phones`);
     
     if (chunk.length === 0) {
+      console.log('No more records to process - marking as complete');
+      
+      await connection.execute(
+        `UPDATE uploaded_files 
+         SET processing_status = 'completed',
+             processing_progress = 100
+         WHERE id = ?`,
+        [fileId]
+      );
+      
       return NextResponse.json({
         success: true,
         isComplete: true,
         processed: totalRecords,
         total: totalRecords,
+        progress: 100,
         message: 'All records processed'
       });
     }
     
-    // Mark as processing
+    // Mark file as processing
     await connection.execute(
       `UPDATE uploaded_files 
        SET processing_status = 'processing'
@@ -84,18 +108,20 @@ export async function POST(request) {
     let cacheHits = 0;
     let apiCalls = 0;
     
-    console.log('Step 1: Checking cache for all phones...');
+    console.log('\n--- STEP 1: Checking cache for all phones (NO rate limiting) ---');
     
     // STEP 1: Check cache for ALL phones first (NO rate limiting)
     for (let i = 0; i < chunk.length; i++) {
       const phone = chunk[i];
       
+      // Check if this phone was already checked within last 6 months
       const cached = await getCachedPhoneCheck(phone.e164);
       
       if (cached) {
         cacheHits++;
         chunkResults.push({
           phone_number: phone.original,
+          e164: phone.e164,
           is_ios: cached.is_ios,
           supports_imessage: cached.supports_imessage,
           supports_sms: cached.supports_sms,
@@ -111,14 +137,19 @@ export async function POST(request) {
       }
     }
     
-    console.log(`Cache hits: ${cacheHits}, Need API calls: ${uncachedPhones.length}`);
+    console.log(`✓ Cache hits: ${cacheHits} (instant)`);
+    console.log(`✓ Need API calls: ${uncachedPhones.length}`);
     
     // STEP 2: Process uncached phones with rate limiting
     if (uncachedPhones.length > 0) {
-      console.log(`Step 2: Processing ${uncachedPhones.length} uncached phones with rate limiting...`);
+      console.log(`\n--- STEP 2: Processing ${uncachedPhones.length} uncached phones with rate limiting (4/sec) ---`);
       
-      for (const phone of uncachedPhones) {
-        // ✅ Rate limit ONLY for API calls
+      const apiStartTime = Date.now();
+      
+      for (let i = 0; i < uncachedPhones.length; i++) {
+        const phone = uncachedPhones[i];
+        
+        // ✅ Rate limit ONLY for API calls (250ms between calls = 4/sec)
         await blooioRateLimiter.acquire();
         
         try {
@@ -127,6 +158,7 @@ export async function POST(request) {
           
           chunkResults.push({
             phone_number: phone.original,
+            e164: phone.e164,
             is_ios: result.is_ios,
             supports_imessage: result.supports_imessage,
             supports_sms: result.supports_sms,
@@ -149,20 +181,37 @@ export async function POST(request) {
             source: 'blooio'
           }, fileId);
           
+          // Log progress every 50 API calls
+          if (apiCalls % 50 === 0) {
+            console.log(`  API progress: ${apiCalls}/${uncachedPhones.length} (${((apiCalls/uncachedPhones.length)*100).toFixed(1)}%)`);
+          }
+          
         } catch (error) {
-          console.error(`Error checking ${phone.e164}:`, error);
+          console.error(`  Error checking ${phone.e164}:`, error.message);
           chunkResults.push({
             phone_number: phone.original,
+            e164: phone.e164,
+            is_ios: false,
+            supports_imessage: false,
+            supports_sms: false,
+            contact_type: null,
+            contact_id: null,
             error: error.message,
             from_cache: false
           });
         }
       }
+      
+      const apiDuration = ((Date.now() - apiStartTime) / 1000).toFixed(1);
+      console.log(`✓ API calls completed in ${apiDuration}s (${apiCalls} calls)`);
     }
     
-    console.log(`Processed: ${chunkResults.length} phones (${cacheHits} cached, ${apiCalls} API calls)`);
+    console.log(`\n--- CHUNK SUMMARY ---`);
+    console.log(`Total processed: ${chunkResults.length} phones`);
+    console.log(`Cache hits: ${cacheHits} (instant)`);
+    console.log(`API calls: ${apiCalls} (rate limited)`);
     
-    // Save chunk results
+    // Save chunk results to database
     await connection.execute(
       `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, created_at) 
        VALUES (?, ?, ?, NOW())
@@ -170,7 +219,9 @@ export async function POST(request) {
       [fileId, startOffset, JSON.stringify(chunkResults)]
     );
     
-    // Update progress
+    console.log(`✓ Chunk data saved to database`);
+    
+    // Update file progress
     const newOffset = startOffset + chunk.length;
     const progressPct = ((newOffset / totalRecords) * 100).toFixed(2);
     const isComplete = newOffset >= totalRecords;
@@ -189,7 +240,9 @@ export async function POST(request) {
       ]
     );
     
-    console.log(`Progress: ${newOffset}/${totalRecords} (${progressPct}%)`);
+    console.log(`\n--- PROGRESS ---`);
+    console.log(`Processed: ${newOffset}/${totalRecords} (${progressPct}%)`);
+    console.log(`Status: ${isComplete ? 'COMPLETE' : 'PROCESSING'}`);
     console.log('=== Chunk Complete ===\n');
     
     return NextResponse.json({
@@ -200,14 +253,22 @@ export async function POST(request) {
       isComplete: isComplete,
       cacheHits: cacheHits,
       apiCalls: apiCalls,
-      chunkSize: chunk.length
+      chunkSize: chunk.length,
+      message: isComplete 
+        ? 'All records processed successfully' 
+        : `Processed ${chunk.length} records, ${totalRecords - newOffset} remaining`
     });
     
   } catch (error) {
-    console.error('Chunked processing error:', error);
+    console.error('\n=== CHUNKED PROCESSING ERROR ===');
+    console.error('Error:', error.message);
+    console.error('Stack:', error.stack);
+    console.error('================================\n');
+    
     return NextResponse.json({
       success: false,
-      error: error.message
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     }, { status: 500 });
   }
 }
