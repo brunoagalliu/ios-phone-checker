@@ -6,17 +6,11 @@ import ProcessingQueue from './components/ProcessingQueue';
 import FileHistory from './components/FileHistory';
 import Instructions from './components/Instructions';
 import FileProgressChecker from './components/FileProgressChecker';
-import QueueMonitor from './components/QueueMonitor';
-import processingQueue from '../lib/processingQueue';
 import ActiveFiles from './components/ActiveFiles';
 
 export default function Home() {
   const [processingFiles, setProcessingFiles] = useState([]);
   const [error, setError] = useState(null);
-  useEffect(() => {
-    // Warm up database connection on page load
-    fetch('/api/warmup').catch(err => console.log('Warmup failed:', err));
-  }, []);
 
   const handleFilesSelected = async (files, service) => {
     setError(null);
@@ -26,7 +20,7 @@ export default function Home() {
       
       console.log(`File: ${file.name}, Size: ${fileSizeMB.toFixed(2)} MB, Service: ${service}`);
       
-      // Parse CSV to count actual records
+      // Parse CSV to count actual records (client-side)
       const shouldCheckRecordCount = fileSizeMB > 0.1;
       
       let actualRecordCount = 0;
@@ -59,7 +53,6 @@ export default function Home() {
         console.log(`✓ Using chunked processing for ${actualRecordCount} records`);
         
         try {
-          // Initialize for chunked processing
           const formData = new FormData();
           formData.append('file', file);
           formData.append('fileName', file.name);
@@ -78,24 +71,15 @@ export default function Home() {
           const data = await response.json();
 
           if (data.success) {
-            // Add to processing queue
-            processingQueue.add({
-              fileId: data.fileId,
-              fileName: file.name,
-              totalRecords: data.totalRecords,
-              service: data.service,
-              chunkSize: data.chunkSize,
-              estimatedChunks: data.estimatedChunks,
-              estimatedTime: data.estimatedTime
-            });
+            console.log('✓ File initialized:', data);
             
-            console.log('✓ File added to processing queue:', data);
-            
-            // Show success message
-            alert(`✅ ${file.name} added to processing queue!\n\n` +
-                  `Total records: ${data.totalRecords.toLocaleString()}\n` +
-                  `Estimated time: ${data.estimatedTime}\n\n` +
-                  `Processing will start automatically.`);
+            alert(
+              `✅ ${file.name} initialized for processing!\n\n` +
+              `Total records: ${data.totalRecords.toLocaleString()}\n` +
+              `Chunk size: ${data.chunkSize}\n` +
+              `Estimated time: ${data.estimatedTime}\n\n` +
+              `Processing will start automatically via cron job.`
+            );
           }
         } catch (err) {
           console.error('Failed to initialize large file:', err);
@@ -128,7 +112,57 @@ export default function Home() {
   };
 
   const processFile = async (fileItem) => {
-    // ... existing processFile code (unchanged)
+    try {
+      updateFileStatus(fileItem.id, { status: 'processing' });
+
+      const batchId = `batch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+      const formData = new FormData();
+      formData.append('file', fileItem.file);
+      formData.append('batchId', batchId);
+      formData.append('fileName', fileItem.name);
+
+      const apiEndpoint = fileItem.service === 'subscriberverify'
+        ? '/api/check-batch-sv'
+        : '/api/check-batch';
+
+      console.log(`Processing ${fileItem.name} with ${fileItem.service} service...`);
+
+      const response = await fetch(apiEndpoint, {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      console.log('API Response:', data);
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to process');
+      }
+
+      updateFileStatus(fileItem.id, {
+        status: 'completed',
+        service: data.service || fileItem.service,
+        validationResults: data.validation,
+        validNumbers: data.validation?.valid || data.total_processed,
+        processedCount: data.total_processed,
+        results: data.results,
+        batchId: batchId,
+        originalFileUrl: data.original_file_url,
+        resultsFileUrl: data.results_file_url,
+        subscriberVerifyStats: data.subscriber_verify_stats,
+        cacheHits: data.cache_hits,
+        apiCalls: data.api_calls
+      });
+
+    } catch (err) {
+      console.error('Processing error:', err);
+      updateFileStatus(fileItem.id, {
+        status: 'error',
+        error: err.message
+      });
+    }
   };
 
   const updateFileStatus = (fileId, updates) => {
@@ -162,10 +196,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* Queue Monitor - shows current processing status */}
-        <QueueMonitor />
-
-        {/* Active Files Dashboard */}
+        {/* Active Files - shows currently processing files */}
         <ActiveFiles />
 
         {/* Normal file upload interface */}
@@ -250,67 +281,7 @@ const styles = {
     cursor: 'pointer',
     padding: '0 5px',
   },
-  chunkedSection: {
-    marginBottom: '30px',
-  },
-  chunkedHeader: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: '20px',
-    paddingBottom: '15px',
-    borderBottom: '2px solid #e0e0e0',
-  },
-  chunkedTitle: {
-    fontSize: '20px',
-    fontWeight: '600',
-    color: '#333',
-    margin: 0,
-  },
-  cancelButton: {
-    padding: '8px 16px',
-    background: '#dc3545',
-    color: 'white',
-    border: 'none',
-    borderRadius: '6px',
-    fontSize: '13px',
-    fontWeight: '600',
-    cursor: 'pointer',
-    transition: 'all 0.3s',
-  },
-  chunkedInfo: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-    gap: '15px',
-    marginBottom: '20px',
-    padding: '20px',
-    background: '#f8f9fa',
-    borderRadius: '10px',
-    border: '2px solid #e0e0e0',
-  },
-  infoItem: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '5px',
-  },
-  infoLabel: {
-    fontSize: '12px',
-    color: '#666',
-    fontWeight: '500',
-  },
-  infoValue: {
-    fontSize: '18px',
-    color: '#333',
-    fontWeight: '700',
-  },
   uploadSection: {
     marginBottom: '30px',
   },
-  
 };
-const styleSheet = `
-  @keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
-  }
-`;
