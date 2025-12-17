@@ -302,4 +302,11 @@ const styles = {
   uploadSection: {
     marginBottom: '30px',
   },
+  
 };
+const styleSheet = `
+  @keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+  }
+`;

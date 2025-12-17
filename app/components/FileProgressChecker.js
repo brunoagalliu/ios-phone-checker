@@ -4,134 +4,97 @@ import { useState } from 'react';
 
 export default function FileProgressChecker() {
   const [fileId, setFileId] = useState('');
-  const [progress, setProgress] = useState(null);
+  const [fileData, setFileData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [reinitializing, setReinitializing] = useState(false);
 
   const checkProgress = async () => {
-    if (!fileId) {
+    if (!fileId || !fileId.trim()) {
       setError('Please enter a file ID');
       return;
     }
 
     setLoading(true);
     setError(null);
+    setFileData(null);
 
     try {
       const response = await fetch(`/api/file-progress?fileId=${fileId}`);
       const data = await response.json();
 
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to fetch progress');
+      if (!data.success) {
+        setError(data.error || 'Failed to fetch file progress');
+        return;
       }
 
-      setProgress(data);
+      setFileData(data.file);
     } catch (err) {
-      setError(err.message);
-      setProgress(null);
+      setError('Failed to fetch file progress: ' + err.message);
     } finally {
       setLoading(false);
     }
   };
 
-  const resumeProcessing = async () => {
-    if (!progress) return;
+  const handleResume = async () => {
+    if (!fileData) return;
 
     setLoading(true);
-
     try {
-      const endpoint = progress.service === 'blooio' 
-        ? '/api/check-batch-blooio-chunked'
-        : '/api/check-batch-chunked';
-
-      console.log('Resuming processing:', {
-        endpoint,
-        fileId: parseInt(fileId),
-        resumeFrom: progress.processing_offset,
-        service: progress.service
-      });
-
-      const response = await fetch(endpoint, {
+      const response = await fetch('/api/check-batch-blooio-chunked', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
-          fileId: parseInt(fileId), 
-          resumeFrom: progress.processing_offset 
+          fileId: fileData.id, 
+          resumeFrom: fileData.processing_offset || 0
         })
       });
 
-      console.log('Response status:', response.status);
+      const result = await response.json();
 
-      const contentType = response.headers.get('content-type');
-      if (!contentType || !contentType.includes('application/json')) {
-        const text = await response.text();
-        console.error('Non-JSON response:', text);
-        throw new Error(`Server returned ${response.status}: ${text.substring(0, 200)}`);
-      }
-
-      const data = await response.json();
-      console.log('Response data:', data);
-      
-      if (data.success) {
-        alert(`✅ Chunk processed!\n\n${data.processed} / ${data.total} records complete\n\nCache hits: ${data.cacheHits}\nAPI calls: ${data.apiCalls}\nTime: ${data.elapsedSeconds}s`);
-        checkProgress();
+      if (result.success) {
+        alert('✅ Processing resumed! Will continue automatically.');
+        checkProgress(); // Refresh data
       } else {
-        alert('❌ Error: ' + (data.error || 'Unknown error'));
+        alert('❌ Failed to resume: ' + result.error);
       }
     } catch (err) {
-      console.error('Resume error:', err);
-      alert('❌ Failed to resume:\n\n' + err.message);
+      alert('❌ Error: ' + err.message);
     } finally {
       setLoading(false);
     }
   };
 
-  const reinitializeFile = async () => {
-    if (!confirm('This will reinitialize the file for chunked processing. Continue?')) {
-      return;
-    }
+  const handleAutoProcess = async () => {
+    if (!fileData) return;
 
-    setReinitializing(true);
+    const confirmed = confirm(
+      `Start auto-processing for File ${fileData.id}?\n\n` +
+      `This will process all remaining chunks automatically.\n` +
+      `Remaining: ${((fileData.processing_total || 0) - (fileData.processing_offset || 0)).toLocaleString()} records`
+    );
 
-    try {
-      const response = await fetch('/api/reinit-file', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileId: parseInt(fileId) })
-      });
+    if (!confirmed) return;
 
-      const data = await response.json();
-
-      if (data.success) {
-        alert(`✅ File reinitialized!\n\nService: ${data.service}\nTotal Records: ${data.totalRecords.toLocaleString()}\nChunk Size: ${data.chunkSize}\nEstimated Chunks: ${data.estimatedChunks}\n\nYou can now use chunked processing.`);
-        checkProgress();
-      } else {
-        alert('❌ Error: ' + data.error);
-      }
-    } catch (err) {
-      alert('❌ Failed to reinitialize: ' + err.message);
-    } finally {
-      setReinitializing(false);
-    }
+    handleResume(); // Same as resume, but with confirmation
   };
 
   return (
     <div style={styles.container}>
       <h3 style={styles.title}>🔍 Check File Progress</h3>
-      
-      <div style={styles.inputGroup}>
+
+      <div style={styles.searchBox}>
         <input
-          type="text"
+          type="number"
           placeholder="Enter File ID"
           value={fileId}
           onChange={(e) => setFileId(e.target.value)}
           style={styles.input}
+          onKeyPress={(e) => e.key === 'Enter' && checkProgress()}
         />
         <button 
-          onClick={checkProgress}
+          onClick={checkProgress} 
           disabled={loading}
-          style={styles.checkButton}
+          style={styles.button}
         >
           {loading ? '⏳ Checking...' : '🔍 Check Progress'}
         </button>
@@ -143,135 +106,115 @@ export default function FileProgressChecker() {
         </div>
       )}
 
-      {progress && (
-        <div style={styles.progressCard}>
-          <div style={styles.progressHeader}>
-            <h4 style={styles.fileName}>📄 {progress.file_name}</h4>
-            <div style={{
+      {fileData && (
+        <div style={styles.resultCard}>
+          <div style={styles.resultHeader}>
+            <h4 style={styles.fileName}>
+              📄 {fileData.file_name || 'Unknown File'}
+            </h4>
+            <span style={{
               ...styles.statusBadge,
-              background: getStatusColor(progress.processing_status)
+              background: fileData.processing_status === 'completed' ? '#10b981' :
+                          fileData.processing_status === 'processing' ? '#3b82f6' :
+                          fileData.processing_status === 'failed' ? '#ef4444' : 
+                          fileData.processing_status === 'initialized' ? '#f59e0b' : '#6b7280'
             }}>
-              {progress.processing_status}
-            </div>
+              {(fileData.processing_status || 'unknown').toUpperCase()}
+            </span>
+          </div>
+
+          <div style={styles.progressBar}>
+            <div 
+              style={{
+                ...styles.progressFill,
+                width: `${Math.min(100, Math.max(0, fileData.processing_progress || 0))}%`
+              }}
+            />
           </div>
 
           <div style={styles.statsGrid}>
             <div style={styles.statItem}>
-              <div style={styles.statLabel}>Service</div>
-              <div style={styles.statValue}>
-                {progress.service === 'blooio' ? '📱 Blooio' : '✅ SubscriberVerify'}
-              </div>
-            </div>
-
-            <div style={styles.statItem}>
-              <div style={styles.statLabel}>Progress</div>
-              <div style={styles.statValue}>
-                {progress.processing_offset.toLocaleString()} / {progress.processing_total.toLocaleString()}
-              </div>
-            </div>
-
-            <div style={styles.statItem}>
-              <div style={styles.statLabel}>Percentage</div>
-              <div style={styles.statValue}>
-                {progress.processing_progress}%
-              </div>
-            </div>
-
-            <div style={styles.statItem}>
-              <div style={styles.statLabel}>Valid Numbers</div>
-              <div style={styles.statValue}>
-                {progress.valid_numbers.toLocaleString()}
-              </div>
-            </div>
-          </div>
-
-          <div style={styles.progressBarContainer}>
-            <div style={styles.progressBar}>
-              <div style={{
-                ...styles.progressFill,
-                width: `${progress.processing_progress}%`
-              }} />
-            </div>
-            <div style={styles.progressText}>
-              {progress.processing_progress}% Complete
-            </div>
-          </div>
-
-          {progress.results_file_url && (
-            <div style={styles.downloadSection}>
-              <a 
-                href={progress.results_file_url}
-                download
-                style={styles.downloadButton}
-              >
-                ⬇️ Download Results
-              </a>
-            </div>
-          )}
-
-          {progress.processing_status === 'processing' && progress.can_resume && (
-            <div style={styles.actionSection}>
-              <button 
-                onClick={resumeProcessing}
-                disabled={loading}
-                style={styles.resumeButton}
-              >
-                {loading ? '⏳ Processing...' : '▶️ Process Next Chunk'}
-              </button>
-              <p style={styles.hint}>
-                💡 Click this button repeatedly to continue processing, or use the automatic processor above.
-              </p>
-            </div>
-          )}
-
-          {progress.processing_status === 'initialized' && progress.can_resume && (
-            <div style={styles.actionSection}>
-              <button 
-                onClick={resumeProcessing}
-                disabled={loading}
-                style={styles.startButton}
-              >
-                {loading ? '⏳ Starting...' : '▶️ Start Processing'}
-              </button>
-            </div>
-          )}
-
-          {!progress.can_resume && progress.processing_status !== 'completed' && (
-            <div style={styles.actionSection}>
-              <button 
-                onClick={reinitializeFile}
-                disabled={reinitializing}
-                style={styles.reinitButton}
-              >
-                {reinitializing ? '⏳ Reinitializing...' : '🔄 Reinitialize for Chunked Processing'}
-              </button>
-              <p style={styles.hint}>
-                💡 This file wasn't set up for chunked processing. Click to reinitialize it.
-              </p>
-            </div>
-          )}
-
-          <div style={styles.detailsSection}>
-            <div style={styles.detailRow}>
-              <span style={styles.detailLabel}>File ID:</span>
-              <span style={styles.detailValue}>{progress.id}</span>
-            </div>
-            <div style={styles.detailRow}>
-              <span style={styles.detailLabel}>Batch ID:</span>
-              <span style={styles.detailValue}>{progress.batch_id}</span>
-            </div>
-            <div style={styles.detailRow}>
-              <span style={styles.detailLabel}>Upload Date:</span>
-              <span style={styles.detailValue}>
-                {new Date(progress.upload_date).toLocaleString()}
+              <span style={styles.statLabel}>Progress</span>
+              <span style={styles.statValue}>
+                {(fileData.processing_offset || 0).toLocaleString()} / {(fileData.processing_total || 0).toLocaleString()}
+              </span>
+              <span style={styles.statPercent}>
+                {(fileData.processing_progress || 0).toFixed(1)}%
               </span>
             </div>
-            <div style={styles.detailRow}>
-              <span style={styles.detailLabel}>Can Resume:</span>
-              <span style={styles.detailValue}>
-                {progress.can_resume ? '✅ Yes' : '❌ No'}
+
+            <div style={styles.statItem}>
+              <span style={styles.statLabel}>Remaining</span>
+              <span style={styles.statValue}>
+                {((fileData.processing_total || 0) - (fileData.processing_offset || 0)).toLocaleString()} records
               </span>
             </div>
+
+            <div style={styles.statItem}>
+              <span style={styles.statLabel}>Can Resume</span>
+              <span style={styles.statValue}>
+                {fileData.can_resume ? '✅ Yes' : '❌ No'}
+              </span>
+            </div>
+
+            <div style={styles.statItem}>
+              <span style={styles.statLabel}>Has State</span>
+              <span style={styles.statValue}>
+                {fileData.processing_state ? '✅ Yes' : '❌ No'}
+              </span>
+            </div>
+
+            {fileData.last_error && (
+              <div style={styles.statItemFull}>
+                <span style={styles.statLabel}>Last Error</span>
+                <span style={styles.statError}>
+                  {fileData.last_error}
+                </span>
+              </div>
+            )}
+
+            {fileData.upload_date && (
+              <div style={styles.statItem}>
+                <span style={styles.statLabel}>Upload Date</span>
+                <span style={styles.statValue}>
+                  {new Date(fileData.upload_date).toLocaleString()}
+                </span>
+              </div>
+            )}
+          </div>
+
+          <div style={styles.actionButtons}>
+            {fileData.can_resume && fileData.processing_status !== 'completed' && (
+              <>
+                <button 
+                  onClick={handleResume}
+                  disabled={loading}
+                  style={styles.resumeButton}
+                >
+                  {loading ? '⏳ Processing...' : '▶️ Resume Processing'}
+                </button>
+
+                <button 
+                  onClick={handleAutoProcess}
+                  disabled={loading}
+                  style={styles.autoButton}
+                >
+                  🚀 Auto-Process All Chunks
+                </button>
+              </>
+            )}
+
+            {fileData.processing_status === 'completed' && (
+              <div style={styles.completedBadge}>
+                ✅ File processing completed!
+              </div>
+            )}
+
+            {!fileData.can_resume && fileData.processing_status !== 'completed' && (
+              <div style={styles.warningBadge}>
+                ⚠️ File cannot be resumed. Please re-upload or reinitialize.
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -279,204 +222,185 @@ export default function FileProgressChecker() {
   );
 }
 
-function getStatusColor(status) {
-  switch (status) {
-    case 'completed': return '#28a745';
-    case 'processing': return '#17a2b8';
-    case 'initialized': return '#ffc107';
-    case 'failed': return '#dc3545';
-    default: return '#6c757d';
-  }
-}
-
 const styles = {
   container: {
     background: '#f8f9fa',
-    borderRadius: '12px',
     padding: '20px',
-    marginTop: '30px',
+    borderRadius: '15px',
+    marginBottom: '30px',
     border: '2px solid #e0e0e0',
   },
   title: {
-    fontSize: '18px',
-    fontWeight: '600',
+    fontSize: '20px',
+    fontWeight: '700',
     color: '#333',
-    marginBottom: '15px',
+    marginBottom: '20px',
   },
-  inputGroup: {
+  searchBox: {
     display: 'flex',
     gap: '10px',
     marginBottom: '20px',
   },
   input: {
     flex: 1,
-    padding: '12px',
-    border: '2px solid #dee2e6',
+    padding: '12px 16px',
+    fontSize: '16px',
+    border: '2px solid #e0e0e0',
     borderRadius: '8px',
-    fontSize: '14px',
+    outline: 'none',
+    transition: 'border-color 0.3s',
   },
-  checkButton: {
+  button: {
     padding: '12px 24px',
-    background: '#667eea',
+    background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
     color: 'white',
     border: 'none',
     borderRadius: '8px',
-    fontSize: '14px',
+    fontSize: '16px',
     fontWeight: '600',
     cursor: 'pointer',
+    transition: 'transform 0.2s',
+    whiteSpace: 'nowrap',
   },
   error: {
-    padding: '12px',
-    background: '#f8d7da',
-    border: '1px solid #f5c6cb',
-    borderRadius: '6px',
-    color: '#721c24',
-    marginBottom: '15px',
+    padding: '12px 16px',
+    background: '#fee2e2',
+    border: '2px solid #fecaca',
+    borderRadius: '8px',
+    color: '#991b1b',
+    marginBottom: '20px',
+    fontSize: '14px',
   },
-  progressCard: {
+  resultCard: {
     background: 'white',
-    borderRadius: '10px',
     padding: '20px',
-    border: '2px solid #dee2e6',
+    borderRadius: '10px',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
   },
-  progressHeader: {
+  resultHeader: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: '20px',
-    paddingBottom: '15px',
-    borderBottom: '2px solid #e0e0e0',
+    marginBottom: '15px',
+    flexWrap: 'wrap',
+    gap: '10px',
   },
   fileName: {
-    fontSize: '16px',
+    margin: 0,
+    fontSize: '18px',
     fontWeight: '600',
     color: '#333',
-    margin: 0,
   },
   statusBadge: {
-    padding: '6px 12px',
+    padding: '6px 14px',
     borderRadius: '20px',
-    fontSize: '12px',
-    fontWeight: '600',
     color: 'white',
-    textTransform: 'uppercase',
-  },
-  statsGrid: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
-    gap: '15px',
-    marginBottom: '20px',
-  },
-  statItem: {
-    textAlign: 'center',
-  },
-  statLabel: {
     fontSize: '12px',
-    color: '#666',
-    marginBottom: '5px',
-  },
-  statValue: {
-    fontSize: '18px',
     fontWeight: '700',
-    color: '#333',
-  },
-  progressBarContainer: {
-    marginBottom: '20px',
+    letterSpacing: '0.5px',
   },
   progressBar: {
-    width: '100%',
-    height: '20px',
-    background: '#e9ecef',
-    borderRadius: '10px',
+    height: '10px',
+    background: '#e0e0e0',
+    borderRadius: '5px',
     overflow: 'hidden',
-    marginBottom: '8px',
+    marginBottom: '20px',
   },
   progressFill: {
     height: '100%',
     background: 'linear-gradient(90deg, #667eea 0%, #764ba2 100%)',
-    transition: 'width 0.3s ease',
+    transition: 'width 0.5s ease',
+    borderRadius: '5px',
   },
-  progressText: {
-    textAlign: 'right',
-    fontSize: '14px',
-    fontWeight: '600',
-    color: '#333',
-  },
-  downloadSection: {
+  statsGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+    gap: '15px',
     marginBottom: '20px',
-    textAlign: 'center',
   },
-  downloadButton: {
-    display: 'inline-block',
-    padding: '12px 24px',
-    background: '#28a745',
-    color: 'white',
-    textDecoration: 'none',
-    borderRadius: '8px',
-    fontSize: '14px',
+  statItem: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '5px',
+  },
+  statItemFull: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '5px',
+    gridColumn: '1 / -1',
+  },
+  statLabel: {
+    fontSize: '12px',
+    color: '#6b7280',
+    fontWeight: '500',
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px',
+  },
+  statValue: {
+    fontSize: '16px',
     fontWeight: '600',
+    color: '#1f2937',
   },
-  actionSection: {
-    marginBottom: '20px',
-    textAlign: 'center',
+  statPercent: {
+    fontSize: '14px',
+    color: '#667eea',
+    fontWeight: '700',
+  },
+  statError: {
+    fontSize: '14px',
+    color: '#ef4444',
+    fontWeight: '500',
+    padding: '8px',
+    background: '#fee2e2',
+    borderRadius: '6px',
+  },
+  actionButtons: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
   },
   resumeButton: {
-    padding: '12px 24px',
-    background: '#17a2b8',
+    width: '100%',
+    padding: '14px',
+    background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
     color: 'white',
     border: 'none',
     borderRadius: '8px',
-    fontSize: '14px',
+    fontSize: '16px',
     fontWeight: '600',
     cursor: 'pointer',
-    marginBottom: '10px',
+    transition: 'transform 0.2s',
   },
-  startButton: {
-    padding: '12px 24px',
-    background: '#28a745',
+  autoButton: {
+    width: '100%',
+    padding: '14px',
+    background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
     color: 'white',
     border: 'none',
     borderRadius: '8px',
-    fontSize: '14px',
+    fontSize: '16px',
     fontWeight: '600',
     cursor: 'pointer',
+    transition: 'transform 0.2s',
   },
-  reinitButton: {
-    padding: '12px 24px',
-    background: '#ffc107',
-    color: '#333',
-    border: 'none',
+  completedBadge: {
+    padding: '12px',
+    background: '#d1fae5',
+    border: '2px solid #a7f3d0',
     borderRadius: '8px',
+    color: '#065f46',
     fontSize: '14px',
     fontWeight: '600',
-    cursor: 'pointer',
-    marginBottom: '10px',
+    textAlign: 'center',
   },
-  hint: {
-    fontSize: '12px',
-    color: '#666',
-    fontStyle: 'italic',
-    margin: '5px 0 0 0',
-  },
-  detailsSection: {
-    background: '#f8f9fa',
-    padding: '15px',
+  warningBadge: {
+    padding: '12px',
+    background: '#fef3c7',
+    border: '2px solid #fde68a',
     borderRadius: '8px',
-  },
-  detailRow: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    padding: '8px 0',
-    borderBottom: '1px solid #dee2e6',
-  },
-  detailLabel: {
-    fontSize: '13px',
-    color: '#666',
-    fontWeight: '500',
-  },
-  detailValue: {
-    fontSize: '13px',
-    color: '#333',
+    color: '#92400e',
+    fontSize: '14px',
     fontWeight: '600',
+    textAlign: 'center',
   },
 };

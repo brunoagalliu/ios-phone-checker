@@ -1,191 +1,332 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import Papa from 'papaparse';
 
 export default function FileHistory() {
-  const [uploadedFiles, setUploadedFiles] = useState([]);
-  const [showHistory, setShowHistory] = useState(false);
+  const [files, setFiles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
-  useEffect(() => {
-    loadFileHistory();
-  }, []);
-
-  const loadFileHistory = async () => {
+  const fetchFiles = async () => {
     try {
+      setError(null);
+      
       const response = await fetch('/api/files');
-      const data = await response.json();
-      if (data.success) {
-        setUploadedFiles(data.files);
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-    } catch (err) {
-      console.error('Failed to load file history:', err);
+      
+      const data = await response.json();
+      
+      if (data.success) {
+        setFiles(data.files || []);
+      } else {
+        throw new Error(data.error || 'Failed to load file history');
+      }
+    } catch (error) {
+      console.error('Failed to load file history:', error);
+      setError(error.message);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const downloadFileResults = async (file) => {
-    // Try direct Blob URL first
-    if (file.results_file_url) {
-      console.log('Downloading from Blob:', file.results_file_url);
-      const a = document.createElement('a');
-      a.href = file.results_file_url;
-      a.download = `${file.original_name.replace('.csv', '')}_results.csv`;
-      a.target = '_blank';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+  useEffect(() => {
+    fetchFiles();
+  }, []);
+
+  const handleDownload = (fileUrl, fileName) => {
+    if (!fileUrl) {
+      alert('❌ No download URL available');
       return;
     }
 
-    // Fallback: fetch from API (old method)
-    try {
-      const response = await fetch(`/api/files?batchId=${file.batch_id}`);
-      const data = await response.json();
-      
-      if (data.success && data.results) {
-        const csv = Papa.unparse(data.results.map(r => ({
-          phone_number: r.phone_number,
-          is_ios: r.is_ios ? 'YES' : 'NO',
-          supports_imessage: r.supports_imessage ? 'YES' : 'NO',
-          supports_sms: r.supports_sms ? 'YES' : 'NO',
-          error: r.error || 'None',
-          checked_at: r.last_checked
-        })));
-
-        const blob = new Blob([csv], { type: 'text/csv' });
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${file.original_name.replace('.csv', '')}_results.csv`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(url);
-      }
-    } catch (err) {
-      alert('Failed to download file results: ' + err.message);
-    }
+    // Create temporary link and trigger download
+    const link = document.createElement('a');
+    link.href = fileUrl;
+    link.download = fileName || 'results.csv';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
-  // Expose refresh function
-  FileHistory.refresh = loadFileHistory;
+  if (loading) {
+    return (
+      <div style={styles.container}>
+        <h3 style={styles.title}>📂 File History</h3>
+        <div style={styles.loading}>
+          <div style={styles.spinner}></div>
+          <span>Loading file history...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div style={styles.container}>
+        <h3 style={styles.title}>📂 File History</h3>
+        <div style={styles.errorBox}>
+          <div style={styles.errorIcon}>⚠️</div>
+          <div style={styles.errorText}>
+            {error}
+          </div>
+          <button 
+            onClick={fetchFiles} 
+            style={styles.retryButton}
+          >
+            🔄 Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (files.length === 0) {
+    return (
+      <div style={styles.container}>
+        <h3 style={styles.title}>📂 File History</h3>
+        <div style={styles.emptyState}>
+          <div style={styles.emptyIcon}>📭</div>
+          <div style={styles.emptyText}>No files uploaded yet</div>
+          <div style={styles.emptyHint}>Upload a CSV file to get started</div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={styles.container}>
-      <button 
-        onClick={() => setShowHistory(!showHistory)}
-        style={styles.toggleButton}
-      >
-        📂 {showHistory ? 'Hide' : 'Show'} File History ({uploadedFiles.length})
-      </button>
-      
-      {showHistory && uploadedFiles.length > 0 && (
-        <div style={styles.historyList}>
-          {uploadedFiles.map((file) => (
-            <div key={file.id} style={styles.historyItem}>
-              <div style={styles.historyInfo}>
-                <div style={styles.historyName}>{file.original_name}</div>
-                <div style={styles.historyMeta}>
-                  Uploaded: {new Date(file.upload_date).toLocaleString()} •
-                  Valid: {file.valid_numbers} •
-                  Invalid: {file.invalid_numbers} •
-                  Status: <span style={file.processing_status === 'completed' ? {color: '#28a745', fontWeight: '600'} : {}}>{file.processing_status}</span>
-                </div>
-                {file.results_file_url && (
-                  <div style={styles.blobUrl}>
-                    📦 Stored in Vercel Blob
-                  </div>
-                )}
-              </div>
-              <button
-                onClick={() => downloadFileResults(file)}
-                style={{
-                  ...styles.downloadButton,
-                  ...(file.processing_status !== 'completed' ? {opacity: 0.5, cursor: 'not-allowed'} : {})
-                }}
-                disabled={file.processing_status !== 'completed'}
-              >
-                ⬇️ Download
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-      
-      {showHistory && uploadedFiles.length === 0 && (
-        <div style={styles.emptyState}>
-          No files uploaded yet
-        </div>
-      )}
+      <div style={styles.header}>
+        <h3 style={styles.title}>📂 File History</h3>
+        <button onClick={fetchFiles} style={styles.refreshButton}>
+          🔄 Refresh
+        </button>
+      </div>
+
+      <div style={styles.tableContainer}>
+        <table style={styles.table}>
+          <thead>
+            <tr style={styles.tableHeader}>
+              <th style={styles.th}>File Name</th>
+              <th style={styles.th}>Upload Date</th>
+              <th style={styles.th}>Total</th>
+              <th style={styles.th}>Valid</th>
+              <th style={styles.th}>Status</th>
+              <th style={styles.th}>Progress</th>
+              <th style={styles.th}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {files.map(file => (
+              <tr key={file.id} style={styles.tableRow}>
+                <td style={styles.td}>
+                  <div style={styles.fileName}>{file.file_name || file.original_name}</div>
+                  <div style={styles.fileId}>ID: {file.id}</div>
+                </td>
+                <td style={styles.td}>
+                  {file.upload_date ? new Date(file.upload_date).toLocaleString() : 'N/A'}
+                </td>
+                <td style={styles.td}>
+                  {(file.total_numbers || 0).toLocaleString()}
+                </td>
+                <td style={styles.td}>
+                  {(file.valid_numbers || 0).toLocaleString()}
+                </td>
+                <td style={styles.td}>
+                  <span style={{
+                    ...styles.statusBadge,
+                    background: file.processing_status === 'completed' ? '#d1fae5' :
+                                file.processing_status === 'processing' ? '#dbeafe' :
+                                file.processing_status === 'failed' ? '#fee2e2' : '#f3f4f6',
+                    color: file.processing_status === 'completed' ? '#065f46' :
+                           file.processing_status === 'processing' ? '#1e40af' :
+                           file.processing_status === 'failed' ? '#991b1b' : '#4b5563'
+                  }}>
+                    {file.processing_status || 'uploaded'}
+                  </span>
+                </td>
+                <td style={styles.td}>
+                  {file.processing_progress ? `${parseFloat(file.processing_progress).toFixed(1)}%` : 'N/A'}
+                </td>
+                <td style={styles.td}>
+                  {file.results_file_url ? (
+                    <button
+                      onClick={() => handleDownload(file.results_file_url, `results_${file.file_name}`)}
+                      style={styles.downloadButton}
+                    >
+                      ⬇️ Download
+                    </button>
+                  ) : (
+                    <span style={styles.noDownload}>No results</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
 const styles = {
   container: {
-    marginTop: '30px',
-    borderTop: '2px solid #e0e0e0',
-    paddingTop: '20px',
-  },
-  toggleButton: {
-    width: '100%',
-    padding: '12px',
     background: '#f8f9fa',
-    border: '2px solid #dee2e6',
-    borderRadius: '8px',
-    fontSize: '14px',
-    fontWeight: '600',
-    cursor: 'pointer',
-    transition: 'all 0.3s',
-    color: '#333',
+    padding: '20px',
+    borderRadius: '15px',
+    marginBottom: '30px',
+    border: '2px solid #e0e0e0',
   },
-  historyList: {
-    marginTop: '15px',
-  },
-  historyItem: {
+  header: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: '15px',
-    background: '#f8f9fa',
-    borderRadius: '8px',
-    marginBottom: '10px',
-    border: '1px solid #dee2e6',
+    marginBottom: '20px',
   },
-  historyInfo: {
-    flex: 1,
-  },
-  historyName: {
-    fontWeight: '600',
+  title: {
+    fontSize: '20px',
+    fontWeight: '700',
     color: '#333',
-    marginBottom: '5px',
-    fontSize: '14px',
+    margin: 0,
   },
-  historyMeta: {
-    fontSize: '12px',
-    color: '#666',
-  },
-  blobUrl: {
-    fontSize: '11px',
-    color: '#17a2b8',
-    marginTop: '4px',
-    fontStyle: 'italic',
-  },
-  downloadButton: {
+  refreshButton: {
     padding: '8px 16px',
-    background: '#28a745',
+    background: '#667eea',
     color: 'white',
     border: 'none',
-    borderRadius: '5px',
-    fontSize: '12px',
+    borderRadius: '6px',
+    fontSize: '14px',
     fontWeight: '600',
     cursor: 'pointer',
-    transition: 'all 0.3s',
+  },
+  loading: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '40px 20px',
+    gap: '15px',
+    color: '#6b7280',
+  },
+  spinner: {
+    width: '40px',
+    height: '40px',
+    border: '4px solid #e0e0e0',
+    borderTop: '4px solid #667eea',
+    borderRadius: '50%',
+    animation: 'spin 1s linear infinite',
+  },
+  errorBox: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '15px',
+    padding: '30px',
+    background: '#fee2e2',
+    border: '2px solid #fecaca',
+    borderRadius: '10px',
+  },
+  errorIcon: {
+    fontSize: '48px',
+  },
+  errorText: {
+    fontSize: '14px',
+    color: '#991b1b',
+    textAlign: 'center',
+    fontWeight: '500',
+  },
+  retryButton: {
+    padding: '10px 20px',
+    background: '#ef4444',
+    color: 'white',
+    border: 'none',
+    borderRadius: '6px',
+    fontSize: '14px',
+    fontWeight: '600',
+    cursor: 'pointer',
   },
   emptyState: {
-    padding: '20px',
-    textAlign: 'center',
-    color: '#666',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    padding: '60px 20px',
+    gap: '10px',
+  },
+  emptyIcon: {
+    fontSize: '64px',
+    opacity: 0.5,
+  },
+  emptyText: {
+    fontSize: '18px',
+    fontWeight: '600',
+    color: '#6b7280',
+  },
+  emptyHint: {
     fontSize: '14px',
+    color: '#9ca3af',
+  },
+  tableContainer: {
+    overflowX: 'auto',
+    background: 'white',
+    borderRadius: '10px',
+    boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
+  },
+  table: {
+    width: '100%',
+    borderCollapse: 'collapse',
+  },
+  tableHeader: {
+    background: '#f9fafb',
+  },
+  th: {
+    padding: '12px 16px',
+    textAlign: 'left',
+    fontSize: '12px',
+    fontWeight: '600',
+    color: '#6b7280',
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px',
+    borderBottom: '2px solid #e5e7eb',
+  },
+  tableRow: {
+    borderBottom: '1px solid #e5e7eb',
+    transition: 'background 0.2s',
+  },
+  td: {
+    padding: '12px 16px',
+    fontSize: '14px',
+    color: '#1f2937',
+  },
+  fileName: {
+    fontWeight: '600',
+    marginBottom: '2px',
+  },
+  fileId: {
+    fontSize: '12px',
+    color: '#6b7280',
+  },
+  statusBadge: {
+    padding: '4px 10px',
+    borderRadius: '12px',
+    fontSize: '12px',
+    fontWeight: '600',
+    display: 'inline-block',
+  },
+  downloadButton: {
+    padding: '6px 12px',
+    background: '#10b981',
+    color: 'white',
+    border: 'none',
+    borderRadius: '6px',
+    fontSize: '13px',
+    fontWeight: '600',
+    cursor: 'pointer',
+  },
+  noDownload: {
+    fontSize: '13px',
+    color: '#9ca3af',
+    fontStyle: 'italic',
   },
 };
