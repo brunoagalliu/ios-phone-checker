@@ -22,12 +22,18 @@ export default function ActiveFiles() {
       
       if (data.success) {
         setActiveFiles(data.files || []);
+        
+        // Show warning if there was a database issue
+        if (data.warning) {
+          console.warn('Active files warning:', data.warning);
+        }
       } else {
         throw new Error(data.error || 'Failed to fetch active files');
       }
     } catch (error) {
       console.error('Failed to fetch active files:', error);
       setError(error.message);
+      // Don't clear existing files on error
     } finally {
       setLoading(false);
     }

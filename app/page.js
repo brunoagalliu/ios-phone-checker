@@ -13,6 +13,10 @@ import ActiveFiles from './components/ActiveFiles';
 export default function Home() {
   const [processingFiles, setProcessingFiles] = useState([]);
   const [error, setError] = useState(null);
+  useEffect(() => {
+    // Warm up database connection on page load
+    fetch('/api/warmup').catch(err => console.log('Warmup failed:', err));
+  }, []);
 
   const handleFilesSelected = async (files, service) => {
     setError(null);
