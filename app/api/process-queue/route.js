@@ -1,101 +1,83 @@
 import { NextResponse } from 'next/server';
 import { getConnection } from '../../../lib/db.js';
 
-export const maxDuration = 300; // 5 minutes
+export const maxDuration = 300;
 
 export async function POST(request) {
   const connection = await getConnection();
   
   try {
-    console.log('🔄 Queue worker checking for pending files...');
+    console.log('🔄 Queue worker checking for files to process...');
     
-    // Get next file to process
-    const [queueItems] = await connection.execute(
-      `SELECT q.*, f.* 
-       FROM processing_queue q
-       JOIN uploaded_files f ON q.file_id = f.id
-       WHERE q.status = 'queued'
-       ORDER BY q.priority DESC, q.created_at ASC
+    // Get files that need processing
+    const [files] = await connection.execute(
+      `SELECT * FROM uploaded_files
+       WHERE (processing_status IN ('initialized', 'processing'))
+         AND can_resume = 1
+         AND processing_offset < processing_total
+         AND processing_state IS NOT NULL
+       ORDER BY upload_date ASC
        LIMIT 1`
     );
     
-    if (queueItems.length === 0) {
-      console.log('✅ Queue empty');
+    if (files.length === 0) {
+      console.log('✅ No files need processing');
       return NextResponse.json({ 
         success: true, 
-        message: 'Queue empty',
-        hasMore: false
+        message: 'No files in queue' 
       });
     }
     
-    const item = queueItems[0];
-    console.log(`🚀 Processing file ${item.file_id}: ${item.file_name}`);
+    const file = files[0];
+    console.log(`🚀 Processing file ${file.id}: ${file.file_name}`);
+    console.log(`   Progress: ${file.processing_offset}/${file.processing_total}`);
     
-    // Mark as processing
-    await connection.execute(
-      `UPDATE processing_queue 
-       SET status = 'processing', started_at = NOW() 
-       WHERE id = ?`,
-      [item.id]
-    );
-    
-    // Process one chunk
-    const service = item.processing_state?.includes('"service":"blooio"') ? 'blooio' : 'subscriberverify';
+    // Determine service
+    const processingState = JSON.parse(file.processing_state);
+    const service = processingState.service || 'blooio';
     const apiEndpoint = service === 'blooio' 
       ? '/api/check-batch-blooio-chunked'
       : '/api/check-batch-chunked';
     
-    const response = await fetch(`${process.env.VERCEL_URL || 'http://localhost:3000'}${apiEndpoint}`, {
+    // Process one chunk
+    const baseUrl = process.env.VERCEL_URL 
+      ? `https://${process.env.VERCEL_URL}` 
+      : 'https://ios.trackthisclicks.com';
+    
+    const response = await fetch(`${baseUrl}${apiEndpoint}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
-        fileId: item.file_id, 
-        resumeFrom: item.processing_offset || 0 
+        fileId: file.id, 
+        resumeFrom: file.processing_offset 
       })
     });
     
     const result = await response.json();
     
-    if (result.isComplete) {
-      // Mark as completed
-      await connection.execute(
-        `UPDATE processing_queue 
-         SET status = 'completed', completed_at = NOW() 
-         WHERE id = ?`,
-        [item.id]
-      );
+    if (result.success) {
+      console.log(`✅ Chunk processed: ${result.processed}/${result.total}`);
       
-      console.log(`✅ File ${item.file_id} completed`);
+      if (result.isComplete) {
+        console.log(`🎉 File ${file.id} completed!`);
+      }
       
       return NextResponse.json({
         success: true,
-        message: 'File completed',
-        fileId: item.file_id,
-        hasMore: true // Check for more files
+        message: result.isComplete ? 'File completed' : 'Chunk completed',
+        fileId: file.id,
+        progress: result.progress
       });
     } else {
-      // Still processing, reset to queued for next chunk
-      await connection.execute(
-        `UPDATE processing_queue 
-         SET status = 'queued' 
-         WHERE id = ?`,
-        [item.id]
-      );
-      
-      console.log(`⏳ File ${item.file_id} chunk completed, more to process`);
-      
+      console.error(`❌ Chunk failed: ${result.error}`);
       return NextResponse.json({
-        success: true,
-        message: 'Chunk completed',
-        fileId: item.file_id,
-        progress: result.processed,
-        total: result.total,
-        hasMore: true
-      });
+        success: false,
+        error: result.error
+      }, { status: 500 });
     }
     
   } catch (error) {
-    console.error('Queue worker error:', error);
+    console.error('❌ Queue worker error:', error);
     return NextResponse.json({
       success: false,
       error: error.message
