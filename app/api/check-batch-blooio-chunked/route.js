@@ -5,20 +5,15 @@ import { savePhoneCheckWithFile } from '../../../lib/db.js';
 
 export const maxDuration = 300;
 
-const CHUNK_SIZE = 250; // Reduced from 400 to prevent timeouts
-const MAX_PROCESSING_TIME = 270000; // 4.5 minutes - leave 30s buffer
+const CHUNK_SIZE = 250;
+const MAX_PROCESSING_TIME = 270000;
 const MAX_RETRIES = 3;
 
-export async function POST(request) {
+// ✅ EXPORTED FUNCTION - Can be called directly from other endpoints
+export async function processChunk(fileId, resumeFrom = 0) {
   let connection;
   
   try {
-    const { fileId, resumeFrom } = await request.json();
-    
-    if (!fileId) {
-      return NextResponse.json({ error: 'File ID required' }, { status: 400 });
-    }
-    
     const startOffset = resumeFrom || 0;
     const chunkStartTime = Date.now();
     
@@ -33,16 +28,17 @@ export async function POST(request) {
     );
     
     if (files.length === 0) {
-      return NextResponse.json({ error: 'File not found' }, { status: 404 });
+      return { success: false, error: 'File not found' };
     }
     
     const file = files[0];
     
     if (!file.processing_state) {
       console.error('No processing_state found in file record');
-      return NextResponse.json({ 
+      return { 
+        success: false,
         error: 'File not initialized for chunked processing. Please re-upload the file.' 
-      }, { status: 400 });
+      };
     }
     
     let processingState;
@@ -50,18 +46,20 @@ export async function POST(request) {
       processingState = JSON.parse(file.processing_state);
     } catch (parseError) {
       console.error('Failed to parse processing_state:', parseError);
-      return NextResponse.json({ 
+      return { 
+        success: false,
         error: 'Invalid processing state. Please reinitialize the file.' 
-      }, { status: 400 });
+      };
     }
     
     const { validPhones, batchId, fileName, service } = processingState;
     
     if (!validPhones || !Array.isArray(validPhones)) {
       console.error('validPhones not found or not an array');
-      return NextResponse.json({ 
+      return { 
+        success: false,
         error: 'Invalid processing state: validPhones missing' 
-      }, { status: 400 });
+      };
     }
     
     const totalRecords = validPhones.length;
@@ -86,14 +84,14 @@ export async function POST(request) {
         [fileId]
       );
       
-      return NextResponse.json({
+      return {
         success: true,
         isComplete: true,
         processed: totalRecords,
         total: totalRecords,
         progress: 100,
         message: 'All records processed'
-      });
+      };
     }
     
     // Mark file as processing
@@ -172,13 +170,13 @@ export async function POST(request) {
       const apiStartTime = Date.now();
       
       for (let i = 0; i < uncachedPhones.length; i++) {
-        // ✅ Check timeout BEFORE processing each number
+        // Check timeout BEFORE processing each number
         const elapsedTime = Date.now() - chunkStartTime;
         if (elapsedTime > MAX_PROCESSING_TIME) {
           console.warn(`⚠️ TIMEOUT PROTECTION: Stopping at ${elapsedTime}ms`);
           console.warn(`   Processed ${apiCalls}/${uncachedPhones.length} API calls`);
           console.warn(`   Saving partial progress to avoid function timeout`);
-          break; // Exit loop, save progress, and trigger next chunk
+          break;
         }
         
         const phone = uncachedPhones[i];
@@ -287,9 +285,6 @@ export async function POST(request) {
     console.log(`Cache hits: ${cacheHits} (instant)`);
     console.log(`API calls: ${apiCalls} (rate limited)`);
     console.log(`Failed: ${failedNumbers.length}`);
-    if (isPartialChunk) {
-      console.log(`⚠️ Partial chunk: ${chunkResults.length}/${chunk.length} phones processed before timeout`);
-    }
     
     // Save chunk results
     await connection.execute(
@@ -301,7 +296,7 @@ export async function POST(request) {
     
     console.log(`✓ Chunk data saved to processing_chunks table`);
     
-    // Update file progress - only count what we actually processed
+    // Update file progress
     const newOffset = startOffset + chunkResults.length;
     const progressPct = ((newOffset / totalRecords) * 100).toFixed(2);
     const isComplete = newOffset >= totalRecords;
@@ -326,31 +321,25 @@ export async function POST(request) {
     console.log(`Processed: ${newOffset.toLocaleString()}/${totalRecords.toLocaleString()} (${progressPct}%)`);
     console.log(`Status: ${isComplete ? '✅ COMPLETE' : '⏳ PROCESSING'}`);
     
-    // ✅ ALWAYS trigger next chunk if not complete (even for partial chunks)
+    // ✅ Auto-trigger next chunk if not complete
     if (!isComplete) {
-      console.log(`\n🔄 Auto-triggering next chunk (offset: ${newOffset})...`);
+      console.log(`\n🔄 Triggering next chunk via direct call...`);
       
-      const baseUrl = process.env.VERCEL_URL 
-        ? `https://${process.env.VERCEL_URL}` 
-        : 'https://ios.trackthisclicks.com';
+      // Use setTimeout to trigger after this function completes
+      setTimeout(() => {
+        processChunk(fileId, newOffset).catch(err => {
+          console.error('❌ Auto-trigger failed:', err.message);
+        });
+      }, 1000);
       
-      // Don't await - fire and forget
-      fetch(`${baseUrl}/api/check-batch-blooio-chunked`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          fileId: fileId, 
-          resumeFrom: newOffset 
-        })
-      }).catch(err => console.error('❌ Auto-trigger failed:', err.message));
-      
-      console.log('✓ Next chunk triggered');
+      console.log('✓ Next chunk will be triggered in 1 second');
     }
     
     console.log('=== Chunk Complete ===\n');
     
-    return NextResponse.json({
-      success: true, // ✅ Always true if we saved progress
+    // Return data object (not NextResponse)
+    return {
+      success: true,
       processed: newOffset,
       total: totalRecords,
       progress: parseFloat(progressPct),
@@ -366,7 +355,7 @@ export async function POST(request) {
         : isPartialChunk
           ? `⚠️ Partial chunk processed (timeout protection): ${chunkResults.length} phones, continuing...`
           : `Processed ${chunkResults.length} records, ${(totalRecords - newOffset).toLocaleString()} remaining`
-    });
+    };
     
   } catch (error) {
     console.error('\n=== ❌ CHUNKED PROCESSING ERROR ===');
@@ -374,10 +363,34 @@ export async function POST(request) {
     console.error('Stack:', error.stack);
     console.error('====================================\n');
     
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// POST handler - wraps the exported function for HTTP requests
+export async function POST(request) {
+  try {
+    const { fileId, resumeFrom } = await request.json();
+    
+    if (!fileId) {
+      return NextResponse.json({ error: 'File ID required' }, { status: 400 });
+    }
+    
+    // Call the exported function
+    const result = await processChunk(fileId, resumeFrom);
+    
+    return NextResponse.json(result, { 
+      status: result.success ? 200 : (result.error === 'File not found' ? 404 : 500)
+    });
+    
+  } catch (error) {
+    console.error('POST handler error:', error);
     return NextResponse.json({
       success: false,
-      error: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      error: error.message
     }, { status: 500 });
   }
 }
