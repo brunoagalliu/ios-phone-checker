@@ -5,9 +5,9 @@ import { savePhoneCheckWithFile } from '../../../lib/db.js';
 
 export const maxDuration = 300;
 
-const CHUNK_SIZE = 400;
-const MAX_PROCESSING_TIME = 270000; // 4.5 minutes
-const MAX_RETRIES = 3; // Retry failed API calls up to 3 times
+const CHUNK_SIZE = 250; // Reduced from 400 to prevent timeouts
+const MAX_PROCESSING_TIME = 270000; // 4.5 minutes - leave 30s buffer
+const MAX_RETRIES = 3;
 
 export async function POST(request) {
   let connection;
@@ -172,23 +172,17 @@ export async function POST(request) {
       const apiStartTime = Date.now();
       
       for (let i = 0; i < uncachedPhones.length; i++) {
-        // Check timeout before processing each number
+        // ✅ Check timeout BEFORE processing each number
         const elapsedTime = Date.now() - chunkStartTime;
         if (elapsedTime > MAX_PROCESSING_TIME) {
-          console.warn(`⚠️ Approaching timeout at ${elapsedTime}ms`);
+          console.warn(`⚠️ TIMEOUT PROTECTION: Stopping at ${elapsedTime}ms`);
           console.warn(`   Processed ${apiCalls}/${uncachedPhones.length} API calls`);
-          console.warn(`   Stopping early to save progress before timeout`);
-          
-          // Save partial progress
-          const partialOffset = startOffset + cacheHits + apiCalls;
-          console.log(`   Partial progress saved at offset ${partialOffset}`);
-          
-          break; // Exit loop and save what we have
+          console.warn(`   Saving partial progress to avoid function timeout`);
+          break; // Exit loop, save progress, and trigger next chunk
         }
         
         const phone = uncachedPhones[i];
         
-        // Rate limit
         await blooioRateLimiter.acquire();
         
         // Retry logic for API calls
@@ -200,23 +194,21 @@ export async function POST(request) {
           try {
             if (retryAttempt > 0) {
               console.log(`  🔄 Retry ${retryAttempt}/${MAX_RETRIES} for ${phone.e164}`);
-              // Exponential backoff: 1s, 2s, 4s
               const backoffMs = Math.pow(2, retryAttempt - 1) * 1000;
               await new Promise(resolve => setTimeout(resolve, backoffMs));
             }
             
             result = await checkBlooioSingle(phone.e164);
             
-            // Check if result has an error
             if (result.error && retryAttempt < MAX_RETRIES) {
               lastError = result.error;
               console.log(`  ⚠️ API returned error: ${result.error}, will retry`);
-              continue; // Retry
+              continue;
             }
             
             apiSuccess = true;
             apiCalls++;
-            break; // Success - exit retry loop
+            break;
             
           } catch (error) {
             lastError = error.message;
@@ -229,7 +221,6 @@ export async function POST(request) {
         }
         
         if (apiSuccess && result) {
-          // Success - add to results
           chunkResults.push({
             phone_number: phone.original,
             e164: phone.e164,
@@ -242,7 +233,6 @@ export async function POST(request) {
             from_cache: false
           });
           
-          // Save to cache
           try {
             await savePhoneCheckWithFile({
               phone_number: phone.e164,
@@ -260,26 +250,7 @@ export async function POST(request) {
           }
           
         } else {
-          // Failed after all retries - add to retry queue
           failedNumbers.push(phone.e164);
-          
-          // Add to retry queue for later processing
-          try {
-            await connection.execute(
-              `INSERT INTO retry_queue 
-               (file_id, phone_number, original_format, e164_format, retry_count, last_error, status)
-               VALUES (?, ?, ?, ?, 0, ?, 'queued')
-               ON DUPLICATE KEY UPDATE 
-                 retry_count = retry_count + 1,
-                 last_error = VALUES(last_error),
-                 last_attempt = NOW()`,
-              [fileId, phone.e164, phone.original, phone.e164, lastError]
-            );
-            
-            console.log(`  📋 Added ${phone.e164} to retry queue`);
-          } catch (queueError) {
-            console.error(`  ⚠️ Failed to add to retry queue: ${queueError.message}`);
-          }
           
           chunkResults.push({
             phone_number: phone.original,
@@ -289,14 +260,12 @@ export async function POST(request) {
             supports_sms: false,
             contact_type: null,
             contact_id: null,
-            error: `Failed after ${MAX_RETRIES} retries: ${lastError} (added to retry queue)`,
-            from_cache: false,
-            queued_for_retry: true
+            error: `Failed after ${MAX_RETRIES} retries: ${lastError}`,
+            from_cache: false
           });
         }
         
-        // Log progress every 50 API calls
-        if (apiCalls % 50 === 0) {
+        if (apiCalls % 50 === 0 && apiCalls > 0) {
           const progressPct = ((apiCalls / uncachedPhones.length) * 100).toFixed(1);
           const elapsed = ((Date.now() - apiStartTime) / 1000).toFixed(1);
           console.log(`  API progress: ${apiCalls}/${uncachedPhones.length} (${progressPct}%) - ${elapsed}s elapsed`);
@@ -308,16 +277,19 @@ export async function POST(request) {
       
       if (failedNumbers.length > 0) {
         console.warn(`⚠️ ${failedNumbers.length} numbers failed after retries`);
-        console.warn(`   Failed numbers: ${failedNumbers.slice(0, 5).join(', ')}${failedNumbers.length > 5 ? '...' : ''}`);
       }
     }
     
+    const isPartialChunk = (Date.now() - chunkStartTime) > MAX_PROCESSING_TIME;
+    
     console.log(`\n--- CHUNK SUMMARY ---`);
-    console.log(`Total processed: ${chunkResults.length} phones`);
+    console.log(`Total processed: ${chunkResults.length} phones${isPartialChunk ? ' (PARTIAL DUE TO TIMEOUT)' : ''}`);
     console.log(`Cache hits: ${cacheHits} (instant)`);
     console.log(`API calls: ${apiCalls} (rate limited)`);
     console.log(`Failed: ${failedNumbers.length}`);
-    console.log(`Cache hit rate: ${((cacheHits / chunkResults.length) * 100).toFixed(1)}%`);
+    if (isPartialChunk) {
+      console.log(`⚠️ Partial chunk: ${chunkResults.length}/${chunk.length} phones processed before timeout`);
+    }
     
     // Save chunk results
     await connection.execute(
@@ -329,7 +301,7 @@ export async function POST(request) {
     
     console.log(`✓ Chunk data saved to processing_chunks table`);
     
-    // Update file progress
+    // Update file progress - only count what we actually processed
     const newOffset = startOffset + chunkResults.length;
     const progressPct = ((newOffset / totalRecords) * 100).toFixed(2);
     const isComplete = newOffset >= totalRecords;
@@ -354,7 +326,7 @@ export async function POST(request) {
     console.log(`Processed: ${newOffset.toLocaleString()}/${totalRecords.toLocaleString()} (${progressPct}%)`);
     console.log(`Status: ${isComplete ? '✅ COMPLETE' : '⏳ PROCESSING'}`);
     
-    // ✅ AUTO-TRIGGER NEXT CHUNK
+    // ✅ ALWAYS trigger next chunk if not complete (even for partial chunks)
     if (!isComplete) {
       console.log(`\n🔄 Auto-triggering next chunk (offset: ${newOffset})...`);
       
@@ -362,7 +334,7 @@ export async function POST(request) {
         ? `https://${process.env.VERCEL_URL}` 
         : 'https://ios.trackthisclicks.com';
       
-      // Fire and forget - don't wait for response
+      // Don't await - fire and forget
       fetch(`${baseUrl}/api/check-batch-blooio-chunked`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -370,9 +342,7 @@ export async function POST(request) {
           fileId: fileId, 
           resumeFrom: newOffset 
         })
-      }).catch(err => {
-        console.error('❌ Failed to auto-trigger next chunk:', err.message);
-      });
+      }).catch(err => console.error('❌ Auto-trigger failed:', err.message));
       
       console.log('✓ Next chunk triggered');
     }
@@ -380,19 +350,22 @@ export async function POST(request) {
     console.log('=== Chunk Complete ===\n');
     
     return NextResponse.json({
-      success: true,
+      success: true, // ✅ Always true if we saved progress
       processed: newOffset,
       total: totalRecords,
       progress: parseFloat(progressPct),
       isComplete: isComplete,
+      isPartialChunk: isPartialChunk,
       cacheHits: cacheHits,
       apiCalls: apiCalls,
       failedCount: failedNumbers.length,
       chunkSize: chunkResults.length,
-      cacheHitRate: parseFloat(((cacheHits / chunkResults.length) * 100).toFixed(1)),
+      cacheHitRate: chunkResults.length > 0 ? parseFloat(((cacheHits / chunkResults.length) * 100).toFixed(1)) : 0,
       message: isComplete 
         ? `✅ All ${totalRecords.toLocaleString()} records processed` 
-        : `Processed ${chunkResults.length} records, ${(totalRecords - newOffset).toLocaleString()} remaining`
+        : isPartialChunk
+          ? `⚠️ Partial chunk processed (timeout protection): ${chunkResults.length} phones, continuing...`
+          : `Processed ${chunkResults.length} records, ${(totalRecords - newOffset).toLocaleString()} remaining`
     });
     
   } catch (error) {
