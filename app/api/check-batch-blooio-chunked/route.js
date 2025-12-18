@@ -106,9 +106,7 @@ export async function processChunk(fileId, resumeFrom = 0) {
       // ✅ AUTO-GENERATE RESULTS FILE
       console.log('🔨 Auto-generating results file...');
       
-      const baseUrl = process.env.VERCEL_URL 
-        ? `https://${process.env.VERCEL_URL}` 
-        : 'https://ios.trackthisclicks.com';
+      const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://ios.smsapp.co';
       
       fetch(`${baseUrl}/api/generate-results`, {
         method: 'POST',
