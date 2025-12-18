@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getConnection } from '../../../lib/db.js';
 import { checkBlooioSingle, blooioRateLimiter } from '../../../lib/blooioClient.js';
-import { savePhoneCheckWithFile } from '../../../lib/db.js';
+import { getBatchFromAppCache, saveBatchToAppCache, getAppCacheStats } from '../../../lib/appCache.js';
 
 export const maxDuration = 300;
 
@@ -40,6 +40,7 @@ export async function processChunk(fileId, resumeFrom = 0) {
       return {
         success: true,
         skipped: true,
+        currentOffset: file.processing_offset,
         message: 'Chunk already processed'
       };
     }
@@ -47,7 +48,6 @@ export async function processChunk(fileId, resumeFrom = 0) {
     if (file.processing_offset < startOffset) {
       console.log(`⚠️ File is behind expected offset: ${file.processing_offset} < ${startOffset}`);
       console.log('   Using current file offset instead');
-      // Will use current offset from file
     }
     
     console.log('✓ Offset verified, proceeding with chunk');
@@ -139,67 +139,124 @@ export async function processChunk(fileId, resumeFrom = 0) {
     const chunkResults = [];
     const uncachedPhones = [];
     let cacheHits = 0;
+    let appCacheHits = 0;
+    let dbCacheHits = 0;
     let apiCalls = 0;
     let failedNumbers = [];
     
-    console.log('\n--- STEP 1: Checking cache for all phones (BATCH QUERY) ---');
+    console.log('\n=== MULTI-TIER CACHE LOOKUP ===');
     
-    const cacheStart = Date.now();
     const phoneNumbers = chunk.map(p => p.e164);
     
-    // Batch cache lookup
-    const placeholders = phoneNumbers.map(() => '?').join(',');
-    const [cachedRows] = await connection.execute(
-      `SELECT * FROM phone_checks 
-       WHERE phone_number IN (${placeholders})
-       AND last_checked >= DATE_SUB(NOW(), INTERVAL 6 MONTH)`,
-      phoneNumbers
-    );
+    // ✅ TIER 1: App Memory Cache (fastest, <1ms)
+    console.log('🔵 TIER 1: Checking app memory cache...');
+    const tier1Start = Date.now();
+    const appCached = getBatchFromAppCache(phoneNumbers);
+    const tier1Duration = Date.now() - tier1Start;
     
-    const cacheDuration = Date.now() - cacheStart;
-    console.log(`✓ Cache batch query completed in ${cacheDuration}ms for ${phoneNumbers.length} phones`);
+    appCacheHits = Object.keys(appCached).length;
+    console.log(`✓ App cache: ${appCacheHits}/${phoneNumbers.length} hits in ${tier1Duration}ms`);
     
-    // Create Map for O(1) lookup
-    const cacheMap = new Map();
-    cachedRows.forEach(row => {
-      cacheMap.set(row.phone_number, {
-        ...row,
-        from_cache: true,
-        cache_age_days: Math.floor((Date.now() - new Date(row.last_checked).getTime()) / (1000 * 60 * 60 * 24))
-      });
-    });
+    // Log cache stats
+    const cacheStats = getAppCacheStats();
+    console.log(`   Cache size: ${cacheStats.size.toLocaleString()}/${cacheStats.maxSize.toLocaleString()} (${cacheStats.usagePercent}% full)`);
     
-    console.log(`✓ Found ${cacheMap.size} cached records in database`);
-    
-    // Process chunk using cache map
-    for (const phone of chunk) {
-      const cached = cacheMap.get(phone.e164);
-      
-      if (cached) {
+    // Add app cache results to chunk
+    Object.entries(appCached).forEach(([phoneNumber, data]) => {
+      const phone = chunk.find(p => p.e164 === phoneNumber);
+      if (phone) {
         cacheHits++;
         chunkResults.push({
           phone_number: phone.original,
           e164: phone.e164,
-          is_ios: cached.is_ios,
-          supports_imessage: cached.supports_imessage,
-          supports_sms: cached.supports_sms,
-          contact_type: cached.contact_type,
-          contact_id: cached.contact_id,
-          error: cached.error,
+          is_ios: data.is_ios,
+          supports_imessage: data.supports_imessage,
+          supports_sms: data.supports_sms,
+          contact_type: data.contact_type,
+          contact_id: data.contact_id,
+          error: data.error,
           from_cache: true,
-          cache_age_days: cached.cache_age_days
+          cache_source: 'app-memory',
+          cache_age_ms: data.cache_age_ms
         });
-      } else {
-        uncachedPhones.push(phone);
+      }
+    });
+    
+    // ✅ TIER 2: Database Cache (slower, 10-30ms with indexes)
+    const uncachedInApp = phoneNumbers.filter(p => !appCached[p]);
+    
+    let dbCached = {};
+    let tier2Duration = 0;
+    
+    if (uncachedInApp.length > 0) {
+      console.log(`\n🟢 TIER 2: Checking database for ${uncachedInApp.length} phones...`);
+      
+      const tier2Start = Date.now();
+      const placeholders = uncachedInApp.map(() => '?').join(',');
+      
+      // Use optimized query with covering index
+      const [cachedRows] = await connection.execute(
+        `SELECT phone_number, is_ios, supports_imessage, supports_sms, 
+                contact_type, contact_id, error, last_checked
+         FROM phone_checks
+         WHERE phone_number IN (${placeholders})
+           AND last_checked >= DATE_SUB(NOW(), INTERVAL 6 MONTH)`,
+        uncachedInApp
+      );
+      
+      tier2Duration = Date.now() - tier2Start;
+      dbCacheHits = cachedRows.length;
+      console.log(`✓ Database: ${dbCacheHits}/${uncachedInApp.length} hits in ${tier2Duration}ms`);
+      
+      // Add DB results to chunk AND promote to app cache
+      const toPromote = [];
+      cachedRows.forEach(row => {
+        const phone = chunk.find(p => p.e164 === row.phone_number);
+        if (phone) {
+          cacheHits++;
+          
+          const result = {
+            phone_number: phone.original,
+            e164: phone.e164,
+            is_ios: row.is_ios,
+            supports_imessage: row.supports_imessage,
+            supports_sms: row.supports_sms,
+            contact_type: row.contact_type,
+            contact_id: row.contact_id,
+            error: row.error,
+            from_cache: true,
+            cache_source: 'database',
+            cache_age_days: Math.floor((Date.now() - new Date(row.last_checked).getTime()) / (1000 * 60 * 60 * 24))
+          };
+          
+          chunkResults.push(result);
+          toPromote.push(result);
+          dbCached[row.phone_number] = row;
+        }
+      });
+      
+      // Promote to app cache
+      if (toPromote.length > 0) {
+        console.log(`📤 Promoting ${toPromote.length} entries to app cache...`);
+        saveBatchToAppCache(toPromote);
       }
     }
     
-    console.log(`✓ Cache hits: ${cacheHits} phones (instant retrieval)`);
-    console.log(`✓ Need API calls: ${uncachedPhones.length} phones`);
+    // ✅ TIER 3: API Calls (slowest, rate-limited)
+    const phonesToCheck = chunk.filter(phone => 
+      !appCached[phone.e164] && !dbCached[phone.e164]
+    );
+    uncachedPhones.push(...phonesToCheck);
     
-    // STEP 2: Process uncached phones with rate limiting AND retry logic
+    console.log(`\n📊 Cache Performance Summary:`);
+    console.log(`   App cache hits: ${appCacheHits} (${tier1Duration}ms) ⚡⚡⚡`);
+    console.log(`   DB cache hits: ${dbCacheHits} (${tier2Duration}ms) ⚡`);
+    console.log(`   Total cache hits: ${cacheHits}/${phoneNumbers.length} (${((cacheHits/phoneNumbers.length)*100).toFixed(1)}%)`);
+    console.log(`   Need API calls: ${uncachedPhones.length}`);
+    
+    // STEP 3: Process uncached phones with rate limiting AND retry logic
     if (uncachedPhones.length > 0) {
-      console.log(`\n--- STEP 2: Processing ${uncachedPhones.length} uncached phones with rate limiting (4/sec) ---`);
+      console.log(`\n--- STEP 3: Processing ${uncachedPhones.length} uncached phones with rate limiting (4/sec) ---`);
       
       const apiStartTime = Date.now();
       
@@ -297,18 +354,22 @@ export async function processChunk(fileId, resumeFrom = 0) {
     
     const isPartialChunk = (Date.now() - chunkStartTime) > MAX_PROCESSING_TIME;
     
-    console.log(`\n--- STEP 3: Saving results to cache (BATCH INSERT) ---`);
+    console.log(`\n--- STEP 4: Saving results to cache layers ---`);
     
-    // Batch save all non-cached results at once
+    // Filter results to save (exclude cached and failed)
     const resultsToSave = chunkResults.filter(r => !r.from_cache && !r.error);
     
     if (resultsToSave.length > 0) {
+      console.log(`💾 Saving ${resultsToSave.length} new results...`);
+      
+      // ✅ LAYER 1: Save to app cache (instant)
+      saveBatchToAppCache(resultsToSave);
+      console.log(`✓ Saved to app cache`);
+      
+      // ✅ LAYER 2: Save to database (persistent)
       try {
-        console.log(`Batch saving ${resultsToSave.length} results to cache...`);
-        
         const saveStart = Date.now();
         
-        // Build bulk INSERT query values
         const values = resultsToSave.map(r => [
           r.e164,
           r.is_ios || false,
@@ -319,11 +380,10 @@ export async function processChunk(fileId, resumeFrom = 0) {
           r.error || null,
           batchId,
           'blooio',
-          1, // check_count
+          1,
           fileId
         ]);
         
-        // Batch insert with ON DUPLICATE KEY UPDATE
         await connection.query(
           `INSERT INTO phone_checks 
           (phone_number, is_ios, supports_imessage, supports_sms, contact_type, contact_id, 
@@ -342,14 +402,13 @@ export async function processChunk(fileId, resumeFrom = 0) {
         );
         
         const saveDuration = Date.now() - saveStart;
-        console.log(`✓ Batch saved ${resultsToSave.length} results in ${saveDuration}ms`);
+        console.log(`✓ Database saved ${resultsToSave.length} results in ${saveDuration}ms`);
       } catch (saveError) {
-        console.error('⚠️ Batch save to cache failed:', saveError.message);
-        console.error('   Continuing processing - results still in chunk data');
-        // Don't fail the entire chunk if cache save fails
+        console.error('⚠️ Database save failed:', saveError.message);
+        console.error('   Continuing processing - results still in app cache');
       }
     } else {
-      console.log('No new results to save to cache (all from cache or failed)');
+      console.log('No new results to save (all from cache or failed)');
     }
     
     console.log(`\n--- CHUNK SUMMARY ---`);
@@ -371,7 +430,7 @@ export async function processChunk(fileId, resumeFrom = 0) {
     
     console.log(`✓ Chunk data saved to processing_chunks table`);
     
-    // ✅ UPDATED SECTION: Calculate new offset and update database
+    // ✅ CALCULATE NEW OFFSET AND UPDATE DATABASE
     const newOffset = startOffset + chunkResults.length;
     const progressPct = ((newOffset / totalRecords) * 100).toFixed(2);
     const isComplete = newOffset >= totalRecords;
@@ -402,18 +461,22 @@ export async function processChunk(fileId, resumeFrom = 0) {
       if (isPartialChunk) {
         console.log('⏳ Partial chunk due to timeout - cron will resume from offset', newOffset);
       } else {
-        const chunkDuration = ((Date.now() - chunkStartTime) / 1000).toFixed(1);
-        console.log(`\n🚀 Chunk completed in ${chunkDuration}s - auto-triggering next chunk (offset ${newOffset})...`);
+        const chunkDuration = parseFloat(((Date.now() - chunkStartTime) / 1000).toFixed(1));
         
-        // Trigger next chunk asynchronously (don't block current response)
-        setImmediate(() => {
-          processChunk(fileId, newOffset).catch(err => {
-            console.error('❌ Auto-trigger failed:', err.message);
-            // Cron will pick it up on next run if this fails
-          });
-        });
-        
-        console.log('✓ Next chunk triggered immediately');
+        // Only auto-trigger if chunk was fast (< 30 seconds)
+        if (chunkDuration < 30) {
+          console.log(`\n🚀 Fast chunk (${chunkDuration}s) - processing next chunk immediately (offset ${newOffset})...`);
+          
+          try {
+            // Direct recursive call for fast chunks
+            return await processChunk(fileId, newOffset);
+          } catch (err) {
+            console.error('❌ Recursive call failed:', err.message);
+            // Fall through to normal return, cron will pick it up
+          }
+        } else {
+          console.log(`⏰ Chunk took ${chunkDuration}s - letting cron handle next chunk`);
+        }
       }
     } else {
       console.log('✅ All chunks complete!');
@@ -430,6 +493,8 @@ export async function processChunk(fileId, resumeFrom = 0) {
       isComplete: isComplete,
       isPartialChunk: isPartialChunk,
       cacheHits: cacheHits,
+      appCacheHits: appCacheHits,
+      dbCacheHits: dbCacheHits,
       apiCalls: apiCalls,
       failedCount: failedNumbers.length,
       savedToCache: resultsToSave.length,

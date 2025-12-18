@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import FileUploader from './components/FileUploader';
 import ProcessingQueue from './components/ProcessingQueue';
 import FileHistory from './components/FileHistory';
@@ -11,6 +11,27 @@ import ActiveFiles from './components/ActiveFiles';
 export default function Home() {
   const [processingFiles, setProcessingFiles] = useState([]);
   const [error, setError] = useState(null);
+  const [cacheStats, setCacheStats] = useState(null); // ✅ ADD THIS
+
+  // ✅ ADD THIS: Fetch cache stats
+  useEffect(() => {
+    const fetchCacheStats = async () => {
+      try {
+        const response = await fetch('/api/cache-stats');
+        const data = await response.json();
+        if (data.success) {
+          setCacheStats(data);
+        }
+      } catch (error) {
+        console.error('Failed to fetch cache stats:', error);
+      }
+    };
+    
+    fetchCacheStats();
+    const interval = setInterval(fetchCacheStats, 15000); // Every 15s
+    
+    return () => clearInterval(interval);
+  }, []);
 
   const handleFilesSelected = async (files, service) => {
     setError(null);
@@ -20,7 +41,6 @@ export default function Home() {
       
       console.log(`File: ${file.name}, Size: ${fileSizeMB.toFixed(2)} MB, Service: ${service}`);
       
-      // Parse CSV to count actual records (client-side)
       const shouldCheckRecordCount = fileSizeMB > 0.1;
       
       let actualRecordCount = 0;
@@ -172,6 +192,7 @@ export default function Home() {
       )
     );
   };
+
   const handleLogout = async () => {
     if (!confirm('Are you sure you want to logout?')) return;
     
@@ -186,19 +207,19 @@ export default function Home() {
   return (
     <main style={styles.main}>
       <div style={styles.container}>
-      <header style={styles.header}>
-        <div style={styles.headerContent}>
-          <div>
-            <h1 style={styles.title}>📱 Phone Number Validator</h1>
-            <p style={styles.subtitle}>
-              Validate US phone numbers and check iOS/iMessage support
-            </p>
+        <header style={styles.header}>
+          <div style={styles.headerContent}>
+            <div>
+              <h1 style={styles.title}>📱 Phone Number Validator</h1>
+              <p style={styles.subtitle}>
+                Validate US phone numbers and check iOS/iMessage support
+              </p>
+            </div>
+            <button onClick={handleLogout} style={styles.logoutButton}>
+              🚪 Logout
+            </button>
           </div>
-          <button onClick={handleLogout} style={styles.logoutButton}>
-            🚪 Logout
-          </button>
-        </div>
-      </header>
+        </header>
 
         {error && (
           <div style={styles.errorBanner}>
@@ -210,6 +231,38 @@ export default function Home() {
             >
               ✕
             </button>
+          </div>
+        )}
+
+        {/* ✅ CACHE STATS WIDGET */}
+        {cacheStats && (
+          <div style={styles.cacheWidget}>
+            <h3 style={styles.cacheTitle}>⚡ Cache Performance</h3>
+            <div style={styles.cacheGrid}>
+              <div style={styles.cacheTier}>
+                <div style={styles.tierIcon}>🔵</div>
+                <div style={styles.tierName}>App Memory</div>
+                <div style={styles.tierSpeed}>&lt;1ms</div>
+                <div style={styles.tierSize}>
+                  {cacheStats.appCache.entries.toLocaleString()} / {cacheStats.appCache.capacity.toLocaleString()}
+                </div>
+                <div style={styles.tierUsage}>
+                  {cacheStats.appCache.usagePercent}% full
+                </div>
+              </div>
+              
+              <div style={styles.cacheTier}>
+                <div style={styles.tierIcon}>🟢</div>
+                <div style={styles.tierName}>Database</div>
+                <div style={styles.tierSpeed}>10-30ms</div>
+                <div style={styles.tierSize}>
+                  {cacheStats.database.total.toLocaleString()} total
+                </div>
+                <div style={styles.tierUsage}>
+                  {cacheStats.database.last24h.toLocaleString()} (24h)
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
@@ -255,8 +308,14 @@ const styles = {
     boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
   },
   header: {
-    textAlign: 'center',
-    marginBottom: '40px',
+    marginBottom: '30px',
+  },
+  headerContent: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: '20px',
   },
   title: {
     fontSize: '36px',
@@ -270,6 +329,18 @@ const styles = {
   subtitle: {
     fontSize: '16px',
     color: '#666',
+  },
+  logoutButton: {
+    padding: '10px 20px',
+    background: '#ef4444',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    fontSize: '14px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'transform 0.2s',
+    whiteSpace: 'nowrap',
   },
   errorBanner: {
     display: 'flex',
@@ -301,23 +372,68 @@ const styles = {
   uploadSection: {
     marginBottom: '30px',
   },
-  headerContent: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: '20px',
+  
+  // ✅ CACHE WIDGET STYLES
+  cacheWidget: {
+    background: 'linear-gradient(135deg, #e0f2fe 0%, #dbeafe 100%)',
+    padding: '25px',
+    borderRadius: '15px',
+    marginBottom: '30px',
+    border: '2px solid #3b82f6',
+    boxShadow: '0 4px 12px rgba(59, 130, 246, 0.15)',
   },
-  logoutButton: {
-    padding: '10px 20px',
-    background: '#ef4444',
-    color: 'white',
-    border: 'none',
-    borderRadius: '8px',
+  cacheTitle: {
+    fontSize: '20px',
+    fontWeight: '700',
+    color: '#1e40af',
+    marginBottom: '20px',
+    margin: 0,
+  },
+  cacheGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
+    gap: '15px',
+  },
+  cacheTier: {
+    background: 'white',
+    padding: '20px',
+    borderRadius: '12px',
+    textAlign: 'center',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+    transition: 'transform 0.2s, box-shadow 0.2s',
+    cursor: 'default',
+  },
+  tierIcon: {
+    fontSize: '32px',
+    marginBottom: '10px',
+  },
+  tierName: {
     fontSize: '14px',
+    fontWeight: '700',
+    color: '#333',
+    marginBottom: '5px',
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px',
+  },
+  tierSpeed: {
+    fontSize: '12px',
+    color: '#10b981',
     fontWeight: '600',
-    cursor: 'pointer',
-    transition: 'transform 0.2s',
-    whiteSpace: 'nowrap',
+    marginBottom: '10px',
+    padding: '4px 8px',
+    background: '#d1fae5',
+    borderRadius: '12px',
+    display: 'inline-block',
+  },
+  tierSize: {
+    fontSize: '18px',
+    fontWeight: '700',
+    color: '#3b82f6',
+    marginBottom: '5px',
+  },
+  tierUsage: {
+    fontSize: '12px',
+    color: '#666',
+    marginTop: '5px',
   },
 };
