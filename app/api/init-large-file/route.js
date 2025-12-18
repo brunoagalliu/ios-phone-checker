@@ -132,9 +132,8 @@ export async function POST(request) {
     // ✅ AUTO-TRIGGER FIRST CHUNK
     console.log('🚀 Auto-triggering first chunk...');
 
-    const baseUrl = process.env.VERCEL_URL 
-      ? `https://${process.env.VERCEL_URL}` 
-      : process.env.NEXT_PUBLIC_BASE_URL || 'http://localhost:3000';
+    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://ios.smsapp.co';
+
 
     // Trigger processing without waiting
     fetch(`${baseUrl}/api/check-batch-blooio-chunked`, {
