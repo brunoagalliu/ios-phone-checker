@@ -3,6 +3,7 @@ import { getConnection } from '../../../lib/db.js';
 import { processChunk } from '../check-batch-blooio-chunked/route.js'; // ✅ Direct import
 
 export const maxDuration = 300;
+export const dynamic = 'force-dynamic';
 
 async function processQueue() {
   const connection = await getConnection();
