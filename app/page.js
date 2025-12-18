@@ -172,16 +172,33 @@ export default function Home() {
       )
     );
   };
+  const handleLogout = async () => {
+    if (!confirm('Are you sure you want to logout?')) return;
+    
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      window.location.href = '/login';
+    } catch (error) {
+      console.error('Logout failed:', error);
+    }
+  };
 
   return (
     <main style={styles.main}>
       <div style={styles.container}>
-        <header style={styles.header}>
-          <h1 style={styles.title}>📱 Phone Number Validator</h1>
-          <p style={styles.subtitle}>
-            Validate US phone numbers and check iOS/iMessage support
-          </p>
-        </header>
+      <header style={styles.header}>
+        <div style={styles.headerContent}>
+          <div>
+            <h1 style={styles.title}>📱 Phone Number Validator</h1>
+            <p style={styles.subtitle}>
+              Validate US phone numbers and check iOS/iMessage support
+            </p>
+          </div>
+          <button onClick={handleLogout} style={styles.logoutButton}>
+            🚪 Logout
+          </button>
+        </div>
+      </header>
 
         {error && (
           <div style={styles.errorBanner}>
@@ -283,5 +300,24 @@ const styles = {
   },
   uploadSection: {
     marginBottom: '30px',
+  },
+  headerContent: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: '20px',
+  },
+  logoutButton: {
+    padding: '10px 20px',
+    background: '#ef4444',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    fontSize: '14px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'transform 0.2s',
+    whiteSpace: 'nowrap',
   },
 };
