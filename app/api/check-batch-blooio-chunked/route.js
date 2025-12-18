@@ -33,16 +33,24 @@ export async function processChunk(fileId, resumeFrom = 0) {
     
     const file = files[0];
     
-    // ✅ LOCK: Check if this offset is still current (prevent duplicate processing)
-    if (file.processing_offset !== startOffset) {
-      console.log(`⚠️ Offset mismatch: Expected ${startOffset}, but file is at ${file.processing_offset}`);
-      console.log('   Another worker may have already processed this chunk, skipping');
+    // ✅ ENHANCED LOCK: Check offset to prevent duplicate processing
+    if (file.processing_offset > startOffset) {
+      console.log(`⚠️ File has moved past this offset: ${file.processing_offset} > ${startOffset}`);
+      console.log('   This chunk was already processed, skipping');
       return {
         success: true,
         skipped: true,
-        message: 'Chunk already processed by another worker'
+        message: 'Chunk already processed'
       };
     }
+    
+    if (file.processing_offset < startOffset) {
+      console.log(`⚠️ File is behind expected offset: ${file.processing_offset} < ${startOffset}`);
+      console.log('   Using current file offset instead');
+      // Will use current offset from file
+    }
+    
+    console.log('✓ Offset verified, proceeding with chunk');
     
     if (!file.processing_state) {
       console.error('No processing_state found in file record');
@@ -363,11 +371,12 @@ export async function processChunk(fileId, resumeFrom = 0) {
     
     console.log(`✓ Chunk data saved to processing_chunks table`);
     
-    // Update file progress
+    // ✅ UPDATED SECTION: Calculate new offset and update database
     const newOffset = startOffset + chunkResults.length;
     const progressPct = ((newOffset / totalRecords) * 100).toFixed(2);
     const isComplete = newOffset >= totalRecords;
     
+    // Update progress in database
     await connection.execute(
       `UPDATE uploaded_files 
        SET processing_offset = ?,
@@ -388,8 +397,27 @@ export async function processChunk(fileId, resumeFrom = 0) {
     console.log(`Processed: ${newOffset.toLocaleString()}/${totalRecords.toLocaleString()} (${progressPct}%)`);
     console.log(`Status: ${isComplete ? '✅ COMPLETE' : '⏳ PROCESSING'}`);
     
-    // ❌ REMOVED AUTO-TRIGGER - Let cron handle all processing
-    console.log('⏳ Next chunk will be processed by cron job');
+    // ✅ SMART AUTO-TRIGGER: Continue immediately if chunk finished fast
+    if (!isComplete) {
+      if (isPartialChunk) {
+        console.log('⏳ Partial chunk due to timeout - cron will resume from offset', newOffset);
+      } else {
+        const chunkDuration = ((Date.now() - chunkStartTime) / 1000).toFixed(1);
+        console.log(`\n🚀 Chunk completed in ${chunkDuration}s - auto-triggering next chunk (offset ${newOffset})...`);
+        
+        // Trigger next chunk asynchronously (don't block current response)
+        setImmediate(() => {
+          processChunk(fileId, newOffset).catch(err => {
+            console.error('❌ Auto-trigger failed:', err.message);
+            // Cron will pick it up on next run if this fails
+          });
+        });
+        
+        console.log('✓ Next chunk triggered immediately');
+      }
+    } else {
+      console.log('✅ All chunks complete!');
+    }
     
     console.log('=== Chunk Complete ===\n');
     
@@ -406,6 +434,7 @@ export async function processChunk(fileId, resumeFrom = 0) {
       failedCount: failedNumbers.length,
       savedToCache: resultsToSave.length,
       chunkSize: chunkResults.length,
+      chunkDuration: ((Date.now() - chunkStartTime) / 1000).toFixed(1),
       cacheHitRate: chunkResults.length > 0 ? parseFloat(((cacheHits / chunkResults.length) * 100).toFixed(1)) : 0,
       message: isComplete 
         ? `✅ All ${totalRecords.toLocaleString()} records processed` 
