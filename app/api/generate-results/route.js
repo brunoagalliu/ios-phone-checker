@@ -44,21 +44,35 @@ export async function POST(request) {
     
     console.log(`Found ${chunks.length} chunks to compile`);
     
-    // Compile results from all chunks
+    // Compile results from all chunks with deduplication
     let allResults = [];
     let totalRecords = 0;
-    
+    const seenPhones = new Map(); // Track unique phones
+
     for (const chunk of chunks) {
-      try {
+    try {
         const chunkData = JSON.parse(chunk.chunk_data);
-        allResults = allResults.concat(chunkData);
+        
+        // Add to map (overwrites duplicates with latest data)
+        for (const result of chunkData) {
+        const phoneKey = result.e164 || result.phone_number;
+        if (phoneKey) {
+            seenPhones.set(phoneKey, result);
+        }
+        }
+        
         totalRecords += chunkData.length;
-      } catch (parseError) {
+    } catch (parseError) {
         console.error(`Error parsing chunk at offset ${chunk.chunk_offset}:`, parseError);
-      }
     }
-    
+    }
+
+    // Convert Map back to array (now deduplicated)
+    allResults = Array.from(seenPhones.values());
+
     console.log(`Total records compiled: ${totalRecords}`);
+    console.log(`Unique records after deduplication: ${allResults.length}`);
+    console.log(`Duplicates removed: ${totalRecords - allResults.length}`);
     
     if (allResults.length === 0) {
       return NextResponse.json({ 
