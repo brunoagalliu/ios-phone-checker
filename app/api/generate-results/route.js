@@ -60,18 +60,31 @@ export async function POST(request) {
     
     console.log(`Total records compiled: ${totalRecords}`);
     
+    if (allResults.length === 0) {
+      return NextResponse.json({ 
+        error: 'No valid results found in chunks' 
+      }, { status: 404 });
+    }
+    
     // Generate CSV
     const csvHeader = 'phone_number,is_ios,supports_imessage,supports_sms,contact_type,contact_id,error,from_cache\n';
     
     const csvRows = allResults.map(result => {
+      // Convert undefined to empty string, null to empty string
+      const safeValue = (val) => {
+        if (val === undefined || val === null) return '';
+        if (typeof val === 'boolean') return val ? 'true' : 'false';
+        return String(val);
+      };
+      
       return [
-        result.phone_number || result.e164 || '',
+        safeValue(result.phone_number || result.e164),
         result.is_ios ? 'true' : 'false',
         result.supports_imessage ? 'true' : 'false',
         result.supports_sms ? 'true' : 'false',
-        result.contact_type || '',
-        result.contact_id || '',
-        result.error || '',
+        safeValue(result.contact_type),
+        safeValue(result.contact_id),
+        safeValue(result.error),
         result.from_cache ? 'true' : 'false'
       ].join(',');
     }).join('\n');
@@ -79,37 +92,49 @@ export async function POST(request) {
     const csvContent = csvHeader + csvRows;
     const csvBuffer = Buffer.from(csvContent, 'utf-8');
     
-    console.log(`Generated CSV: ${csvBuffer.length} bytes`);
+    console.log(`Generated CSV: ${csvBuffer.length} bytes, ${totalRecords} records`);
     
     // Upload to blob storage
-    const resultsFileName = `results_${file.file_name || `file_${fileId}`}_${Date.now()}.csv`;
+    const timestamp = Date.now();
+    const baseFileName = file.file_name || file.original_name || `file_${fileId}`;
+    const resultsFileName = `results_${baseFileName}_${timestamp}.csv`;
+    
+    console.log(`Uploading to blob storage: ${resultsFileName}`);
+    
     const resultsBlob = await uploadFile(csvBuffer, resultsFileName, 'results');
     
     console.log(`Uploaded results to: ${resultsBlob.url}`);
     
-    // Update file record with results URL
+    // Update file record with results URL (use null for undefined values)
+    const resultsUrl = resultsBlob.url || null;
+    const resultsSize = resultsBlob.size || 0;
+    
     await connection.execute(
       `UPDATE uploaded_files 
        SET results_file_url = ?,
            results_file_size = ?
        WHERE id = ?`,
-      [resultsBlob.url, resultsBlob.size, fileId]
+      [resultsUrl, resultsSize, fileId]
     );
     
     console.log(`✓ Results file generated successfully`);
     
     return NextResponse.json({
       success: true,
-      resultsUrl: resultsBlob.url,
+      resultsUrl: resultsUrl,
       totalRecords: totalRecords,
-      fileSize: resultsBlob.size
+      fileSize: resultsSize,
+      fileName: resultsFileName
     });
     
   } catch (error) {
     console.error('Generate results error:', error);
+    console.error('Error stack:', error.stack);
+    
     return NextResponse.json({
       success: false,
-      error: error.message
+      error: error.message,
+      details: error.stack
     }, { status: 500 });
   }
 }
