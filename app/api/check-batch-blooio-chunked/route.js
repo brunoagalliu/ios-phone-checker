@@ -33,6 +33,17 @@ export async function processChunk(fileId, resumeFrom = 0) {
     
     const file = files[0];
     
+    // ✅ LOCK: Check if this offset is still current (prevent duplicate processing)
+    if (file.processing_offset !== startOffset) {
+      console.log(`⚠️ Offset mismatch: Expected ${startOffset}, but file is at ${file.processing_offset}`);
+      console.log('   Another worker may have already processed this chunk, skipping');
+      return {
+        success: true,
+        skipped: true,
+        message: 'Chunk already processed by another worker'
+      };
+    }
+    
     if (!file.processing_state) {
       console.error('No processing_state found in file record');
       return { 
@@ -340,11 +351,13 @@ export async function processChunk(fileId, resumeFrom = 0) {
     console.log(`Failed: ${failedNumbers.length}`);
     console.log(`Saved to cache: ${resultsToSave.length}`);
     
-    // Save chunk results
+    // Save chunk results with ON DUPLICATE KEY UPDATE to prevent duplicates
     await connection.execute(
       `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, created_at) 
        VALUES (?, ?, ?, NOW())
-       ON DUPLICATE KEY UPDATE chunk_data = VALUES(chunk_data)`,
+       ON DUPLICATE KEY UPDATE 
+         chunk_data = VALUES(chunk_data),
+         created_at = NOW()`,
       [fileId, startOffset, JSON.stringify(chunkResults)]
     );
     
@@ -375,19 +388,8 @@ export async function processChunk(fileId, resumeFrom = 0) {
     console.log(`Processed: ${newOffset.toLocaleString()}/${totalRecords.toLocaleString()} (${progressPct}%)`);
     console.log(`Status: ${isComplete ? '✅ COMPLETE' : '⏳ PROCESSING'}`);
     
-    // ✅ Auto-trigger next chunk if not complete
-    if (!isComplete) {
-      console.log(`\n🔄 Triggering next chunk via direct call...`);
-      
-      // Use setTimeout to trigger after this function completes
-      setTimeout(() => {
-        processChunk(fileId, newOffset).catch(err => {
-          console.error('❌ Auto-trigger failed:', err.message);
-        });
-      }, 1000);
-      
-      console.log('✓ Next chunk will be triggered in 1 second');
-    }
+    // ❌ REMOVED AUTO-TRIGGER - Let cron handle all processing
+    console.log('⏳ Next chunk will be processed by cron job');
     
     console.log('=== Chunk Complete ===\n');
     
