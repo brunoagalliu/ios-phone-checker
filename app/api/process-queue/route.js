@@ -42,25 +42,32 @@ async function processQueue() {
     const result = await processChunk(file.id, file.processing_offset);
     
     if (result.success) {
-      console.log(`✅ Chunk processed: ${result.processed}/${result.total} (${result.progress}%)`);
-      
-      if (result.isComplete) {
-        console.log(`🎉 File ${file.id} completed!`);
-      }
-      
-      return {
-        success: true,
-        message: result.isComplete ? 'File completed' : 'Chunk completed',
-        fileId: file.id,
-        progress: result.progress
-      };
-    } else {
-      console.error(`❌ Chunk failed: ${result.error}`);
-      return {
-        success: false,
-        error: result.error
-      };
-    }
+  // Handle skipped chunks
+  if (result.skipped) {
+    console.log(`⏭️ Chunk was skipped (already processed by auto-trigger)`);
+    return {
+      success: true,
+      message: 'Chunk already processed',
+      fileId: file.id,
+      skipped: true
+    };
+  }
+  
+  console.log(`✅ Chunk processed: ${result.processed}/${result.total} (${result.progress}%)`);
+  
+  if (result.isComplete) {
+    console.log(`🎉 File ${file.id} completed!`);
+  }
+  
+  return {
+    success: true,
+    message: result.isComplete ? 'File completed' : 'Chunk completed',
+    fileId: file.id,
+    progress: result.progress,
+    processed: result.processed,
+    total: result.total
+  };
+}
     
   } catch (error) {
     console.error('❌ Queue worker error:', error);
