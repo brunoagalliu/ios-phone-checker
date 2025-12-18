@@ -106,7 +106,9 @@ export async function processChunk(fileId, resumeFrom = 0) {
       // ✅ AUTO-GENERATE RESULTS FILE
       console.log('🔨 Auto-generating results file...');
       
-      const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://ios.smsapp.co';
+      const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
+      const host = request.headers.get('host') || 'ios.smsapp.co';
+      const baseUrl = `${protocol}://${host}`;
       
       fetch(`${baseUrl}/api/generate-results`, {
         method: 'POST',

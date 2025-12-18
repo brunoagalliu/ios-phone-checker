@@ -132,7 +132,11 @@ export async function POST(request) {
     // ✅ AUTO-TRIGGER FIRST CHUNK
     console.log('🚀 Auto-triggering first chunk...');
 
-    const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://ios.smsapp.co';
+    //const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://ios.smsapp.co';
+
+    const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
+    const host = request.headers.get('host') || 'ios.smsapp.co';
+    const baseUrl = `${protocol}://${host}`;
 
 
     // Trigger processing without waiting

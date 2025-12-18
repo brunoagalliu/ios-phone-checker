@@ -1,6 +1,8 @@
 {
-    "crons": [{
-      "path": "/api/process-queue",
-      "schedule": "* * * * *"
-    }]
+    "crons": [
+      {
+        "path": "/api/process-queue",
+        "schedule": "* * * * *"
+      }
+    ]
   }
