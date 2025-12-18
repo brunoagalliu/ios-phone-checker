@@ -230,23 +230,6 @@ export async function processChunk(fileId, resumeFrom = 0) {
             error: result.error,
             from_cache: false
           });
-          
-          try {
-            await savePhoneCheckWithFile({
-              phone_number: phone.e164,
-              is_ios: result.is_ios,
-              supports_imessage: result.supports_imessage,
-              supports_sms: result.supports_sms,
-              contact_type: result.contact_type,
-              contact_id: result.contact_id,
-              error: result.error,
-              batch_id: batchId,
-              source: 'blooio'
-            }, fileId);
-          } catch (saveError) {
-            console.error(`  ⚠️ Failed to save to cache: ${saveError.message}`);
-          }
-          
         } else {
           failedNumbers.push(phone.e164);
           
@@ -280,11 +263,67 @@ export async function processChunk(fileId, resumeFrom = 0) {
     
     const isPartialChunk = (Date.now() - chunkStartTime) > MAX_PROCESSING_TIME;
     
+    console.log(`\n--- STEP 3: Saving results to cache (BATCH INSERT) ---`);
+    
+    // Batch save all non-cached results at once
+    const resultsToSave = chunkResults.filter(r => !r.from_cache && !r.error);
+    
+    if (resultsToSave.length > 0) {
+      try {
+        console.log(`Batch saving ${resultsToSave.length} results to cache...`);
+        
+        const saveStart = Date.now();
+        
+        // Build bulk INSERT query values
+        const values = resultsToSave.map(r => [
+          r.e164,
+          r.is_ios || false,
+          r.supports_imessage || false,
+          r.supports_sms || false,
+          r.contact_type || null,
+          r.contact_id || null,
+          r.error || null,
+          batchId,
+          'blooio',
+          1, // check_count
+          fileId
+        ]);
+        
+        // Batch insert with ON DUPLICATE KEY UPDATE
+        await connection.query(
+          `INSERT INTO phone_checks 
+          (phone_number, is_ios, supports_imessage, supports_sms, contact_type, contact_id, 
+           error, batch_id, source, check_count, file_id) 
+          VALUES ?
+          ON DUPLICATE KEY UPDATE
+            is_ios = VALUES(is_ios),
+            supports_imessage = VALUES(supports_imessage),
+            supports_sms = VALUES(supports_sms),
+            contact_type = VALUES(contact_type),
+            contact_id = VALUES(contact_id),
+            error = VALUES(error),
+            last_checked = NOW(),
+            check_count = check_count + 1`,
+          [values]
+        );
+        
+        const saveDuration = Date.now() - saveStart;
+        console.log(`✓ Batch saved ${resultsToSave.length} results in ${saveDuration}ms`);
+      } catch (saveError) {
+        console.error('⚠️ Batch save to cache failed:', saveError.message);
+        console.error('   Continuing processing - results still in chunk data');
+        // Don't fail the entire chunk if cache save fails
+      }
+    } else {
+      console.log('No new results to save to cache (all from cache or failed)');
+    }
+    
     console.log(`\n--- CHUNK SUMMARY ---`);
     console.log(`Total processed: ${chunkResults.length} phones${isPartialChunk ? ' (PARTIAL DUE TO TIMEOUT)' : ''}`);
     console.log(`Cache hits: ${cacheHits} (instant)`);
     console.log(`API calls: ${apiCalls} (rate limited)`);
     console.log(`Failed: ${failedNumbers.length}`);
+    console.log(`Saved to cache: ${resultsToSave.length}`);
     
     // Save chunk results
     await connection.execute(
@@ -348,6 +387,7 @@ export async function processChunk(fileId, resumeFrom = 0) {
       cacheHits: cacheHits,
       apiCalls: apiCalls,
       failedCount: failedNumbers.length,
+      savedToCache: resultsToSave.length,
       chunkSize: chunkResults.length,
       cacheHitRate: chunkResults.length > 0 ? parseFloat(((cacheHits / chunkResults.length) * 100).toFixed(1)) : 0,
       message: isComplete 
