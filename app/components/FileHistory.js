@@ -51,6 +51,29 @@ export default function FileHistory() {
     document.body.removeChild(link);
   };
 
+  const handleGenerateResults = async (fileId) => {
+    if (!confirm(`Generate results file for File ${fileId}?`)) return;
+    
+    try {
+      const response = await fetch('/api/generate-results', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileId })
+      });
+      
+      const data = await response.json();
+      
+      if (data.success) {
+        alert(`✅ Results generated!\n\nRecords: ${data.totalRecords.toLocaleString()}\nSize: ${(data.fileSize / 1024).toFixed(2)} KB`);
+        fetchFiles(); // Refresh to show download button
+      } else {
+        alert(`❌ Failed: ${data.error}`);
+      }
+    } catch (error) {
+      alert(`❌ Error: ${error.message}`);
+    }
+  };
+
   if (loading) {
     return (
       <div style={styles.container}>
@@ -158,8 +181,15 @@ export default function FileHistory() {
                     >
                       ⬇️ Download
                     </button>
+                  ) : file.processing_status === 'completed' ? (
+                    <button
+                      onClick={() => handleGenerateResults(file.id)}
+                      style={styles.generateButton}
+                    >
+                      🔨 Generate Results
+                    </button>
                   ) : (
-                    <span style={styles.noDownload}>No results</span>
+                    <span style={styles.noDownload}>Processing...</span>
                   )}
                 </td>
               </tr>
@@ -328,5 +358,15 @@ const styles = {
     fontSize: '13px',
     color: '#9ca3af',
     fontStyle: 'italic',
+  },
+  generateButton: {
+    padding: '6px 12px',
+    background: '#f59e0b',
+    color: 'white',
+    border: 'none',
+    borderRadius: '6px',
+    fontSize: '13px',
+    fontWeight: '600',
+    cursor: 'pointer',
   },
 };

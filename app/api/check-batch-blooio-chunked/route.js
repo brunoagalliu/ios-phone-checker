@@ -84,13 +84,28 @@ export async function processChunk(fileId, resumeFrom = 0) {
         [fileId]
       );
       
+      // ✅ AUTO-GENERATE RESULTS FILE
+      console.log('🔨 Auto-generating results file...');
+      
+      const baseUrl = process.env.VERCEL_URL 
+        ? `https://${process.env.VERCEL_URL}` 
+        : 'https://ios.trackthisclicks.com';
+      
+      fetch(`${baseUrl}/api/generate-results`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileId: fileId })
+      }).catch(err => {
+        console.error('Failed to auto-generate results:', err.message);
+      });
+      
       return {
         success: true,
         isComplete: true,
         processed: totalRecords,
         total: totalRecords,
         progress: 100,
-        message: 'All records processed'
+        message: 'All records processed, generating results file...'
       };
     }
     
