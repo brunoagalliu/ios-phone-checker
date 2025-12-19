@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getConnection } from '../../../lib/db.js';
-import { checkBlooioSingle, blooioRateLimiter, API_KEYS } from '../../../lib/blooioClient.js';
+import { checkBlooioSingle, blooioRateLimiter } from '../../../lib/blooioClient.js';
 import { getBatchFromAppCache, saveBatchToAppCache, getAppCacheStats } from '../../../lib/appCache.js';
 
 export const maxDuration = 300;
@@ -254,19 +254,20 @@ export async function processChunk(fileId, resumeFrom = 0) {
     console.log(`   Total cache hits: ${cacheHits}/${phoneNumbers.length} (${((cacheHits/phoneNumbers.length)*100).toFixed(1)}%)`);
     console.log(`   Need API calls: ${uncachedPhones.length}`);
     
-// STEP 3: Process uncached phones with PARALLEL API calls
+// STEP 3: Process uncached phones in PARALLEL BATCHES
 if (uncachedPhones.length > 0) {
-  console.log(`\n--- STEP 3: Processing ${uncachedPhones.length} uncached phones with ${API_KEYS.length} parallel API keys ---`);
+  console.log(`\n--- STEP 3: Processing ${uncachedPhones.length} uncached phones in parallel batches (4 req/sec) ---`);
   
   const apiStartTime = Date.now();
   let totalApiTime = 0;
   let slowApiCalls = 0;
   let retryCount = 0;
   
-  // ✅ PARALLEL PROCESSING - Process multiple phones at once
-  const PARALLEL_BATCH_SIZE = API_KEYS.length * 2; // Process 2 phones per key simultaneously
+  const BATCH_SIZE = 4; // Process 4 phones simultaneously per second
+  const MAX_RETRIES = 3;
   
-  for (let batchStart = 0; batchStart < uncachedPhones.length; batchStart += PARALLEL_BATCH_SIZE) {
+  // Process in batches of 4
+  for (let batchStart = 0; batchStart < uncachedPhones.length; batchStart += BATCH_SIZE) {
     // Check timeout
     const elapsedTime = Date.now() - chunkStartTime;
     if (elapsedTime > MAX_PROCESSING_TIME) {
@@ -275,10 +276,12 @@ if (uncachedPhones.length > 0) {
       break;
     }
     
-    // Get batch of phones to process in parallel
-    const batch = uncachedPhones.slice(batchStart, batchStart + PARALLEL_BATCH_SIZE);
+    const batch = uncachedPhones.slice(batchStart, batchStart + BATCH_SIZE);
     
-    // Process entire batch in parallel
+    // Wait for rate limiter (1 second between batches)
+    await blooioRateLimiter.acquireBatch(batch.length);
+    
+    // Process entire batch in parallel with retries
     const batchPromises = batch.map(async (phone) => {
       let apiSuccess = false;
       let result = null;
@@ -314,7 +317,7 @@ if (uncachedPhones.length > 0) {
           lastError = error.message;
           
           if (retryAttempt === MAX_RETRIES) {
-            console.error(`  ❌ Max retries reached for ${phone.e164}`);
+            console.error(`  ❌ Max retries for ${phone.e164}`);
           }
         }
       }
@@ -323,9 +326,11 @@ if (uncachedPhones.length > 0) {
     });
     
     // Wait for entire batch to complete
+    const batchStartTime = Date.now();
     const batchResults = await Promise.all(batchPromises);
+    const batchDuration = Date.now() - batchStartTime;
     
-    // Process results
+    // Process batch results
     batchResults.forEach(({ phone, apiSuccess, result, lastError }) => {
       if (apiSuccess && result && result.is_ios !== null) {
         apiCalls++;
@@ -356,12 +361,13 @@ if (uncachedPhones.length > 0) {
       }
     });
     
-    // Progress logging
-    const processed = batchStart + batch.length;
-    if (processed % 50 === 0 || processed === uncachedPhones.length) {
+    // Log batch performance
+    if (batchStart % 40 === 0 || (batchStart + BATCH_SIZE) >= uncachedPhones.length) {
+      const processed = batchStart + batch.length;
       const progressPct = ((processed / uncachedPhones.length) * 100).toFixed(1);
       const elapsed = ((Date.now() - apiStartTime) / 1000).toFixed(1);
-      console.log(`  API progress: ${processed}/${uncachedPhones.length} (${progressPct}%) - ${elapsed}s elapsed`);
+      const avgBatchTime = (batchDuration / 1000).toFixed(2);
+      console.log(`  Progress: ${processed}/${uncachedPhones.length} (${progressPct}%) - ${elapsed}s elapsed - Last batch: ${avgBatchTime}s`);
     }
   }
   
@@ -369,20 +375,24 @@ if (uncachedPhones.length > 0) {
   
   console.log(`\n--- API PERFORMANCE BREAKDOWN ---`);
   console.log(`✓ API processing completed in ${apiDuration}s`);
-  console.log(`  Using ${API_KEYS.length} parallel API keys`);
+  console.log(`  Processing mode: Parallel batches of 4`);
   console.log(`  Total API calls: ${apiCalls}`);
-  console.log(`  Effective rate: ${(apiCalls / parseFloat(apiDuration)).toFixed(1)} req/sec`);
   
   if (apiCalls > 0) {
     const avgApiTime = (totalApiTime / apiCalls).toFixed(0);
-    const expectedTime = (uncachedPhones.length / (API_KEYS.length * 4)).toFixed(1);
+    const expectedTime = Math.ceil(uncachedPhones.length / 4); // 1 second per batch of 4
+    const actualRate = (apiCalls / parseFloat(apiDuration)).toFixed(1);
     
     console.log(`  Average API call time: ${avgApiTime}ms`);
     console.log(`  Slow API calls (>500ms): ${slowApiCalls}`);
     console.log(`  Total retries: ${retryCount}`);
-    console.log(`  Expected duration: ${expectedTime}s`);
+    console.log(`  Expected duration: ~${expectedTime}s (at 4/sec parallel)`);
     console.log(`  Actual duration: ${apiDuration}s`);
-    console.log(`  Speedup: ${(190 / parseFloat(apiDuration)).toFixed(1)}x faster than single key! ⚡`);
+    console.log(`  Actual rate: ${actualRate} req/sec`);
+    
+    if (parseFloat(apiDuration) < 70) {
+      console.log(`  ⚡ FAST: Parallel processing working efficiently!`);
+    }
   }
   
   if (failedNumbers.length > 0) {
