@@ -1,17 +1,25 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 
 export default function ActiveFiles() {
   const [activeFiles, setActiveFiles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  
+  const fetchingRef = useRef(false);
+  const mountedRef = useRef(true);
 
-  const fetchActiveFiles = async () => {
+  const fetchActiveFiles = useCallback(async () => {
+    // Prevent duplicate requests
+    if (fetchingRef.current) {
+      console.log('⏭️ Skipping - fetch already in progress');
+      return;
+    }
+    
+    fetchingRef.current = true;
+    
     try {
-      setError(null);
-      setLoading(true);
-      
       const response = await fetch('/api/active-files');
       
       if (!response.ok) {
@@ -20,10 +28,13 @@ export default function ActiveFiles() {
       
       const data = await response.json();
       
+      // Only update state if component is still mounted
+      if (!mountedRef.current) return;
+      
       if (data.success) {
         setActiveFiles(data.files || []);
+        setError(null);
         
-        // Show warning if there was a database issue
         if (data.warning) {
           console.warn('Active files warning:', data.warning);
         }
@@ -32,20 +43,29 @@ export default function ActiveFiles() {
       }
     } catch (error) {
       console.error('Failed to fetch active files:', error);
-      setError(error.message);
-      // Don't clear existing files on error
+      if (mountedRef.current) {
+        setError(error.message);
+      }
     } finally {
-      setLoading(false);
+      if (mountedRef.current) {
+        setLoading(false);
+      }
+      fetchingRef.current = false;
     }
-  };
+  }, []);
 
   useEffect(() => {
+    mountedRef.current = true;
+    
     fetchActiveFiles();
     
-    // Refresh every 10 seconds
     const interval = setInterval(fetchActiveFiles, 10000);
-    return () => clearInterval(interval);
-  }, []);
+    
+    return () => {
+      mountedRef.current = false;
+      clearInterval(interval);
+    };
+  }, [fetchActiveFiles]);
 
   const handleResume = async (fileId) => {
     try {
