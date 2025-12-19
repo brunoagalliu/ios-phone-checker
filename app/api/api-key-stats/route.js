@@ -1,21 +1,21 @@
 import { NextResponse } from 'next/server';
-import { getApiKeyStats } from '../../../lib/blooioClient.js';
 
 export const maxDuration = 10;
 
 export async function GET() {
-  try {
-    const stats = getApiKeyStats();
-    
-    return NextResponse.json({
-      success: true,
-      stats: stats,
-      message: `Using ${stats.totalKeys} API key(s) for ${stats.effectiveRate} req/sec`
-    });
-  } catch (error) {
-    return NextResponse.json({
-      success: false,
-      error: error.message
-    });
-  }
+  const hasApiKey = !!process.env.BLOOIO_API_KEY;
+  
+  return NextResponse.json({
+    success: true,
+    stats: {
+      apiKeyConfigured: hasApiKey,
+      processingMode: 'Parallel batches',
+      batchSize: 4,
+      rateLimit: '4 requests per second',
+      parallelProcessing: true
+    },
+    message: hasApiKey 
+      ? 'Single API key with parallel batch processing (4 simultaneous requests)' 
+      : 'API key not configured'
+  });
 }
