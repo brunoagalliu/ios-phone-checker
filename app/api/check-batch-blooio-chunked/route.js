@@ -259,6 +259,10 @@ export async function processChunk(fileId, resumeFrom = 0) {
       console.log(`\n--- STEP 3: Processing ${uncachedPhones.length} uncached phones with rate limiting (4/sec) ---`);
       
       const apiStartTime = Date.now();
+      let totalApiTime = 0; // ✅ Track total API time
+      let totalRateLimitWait = 0; // ✅ Track rate limiter wait
+      let slowApiCalls = 0; // ✅ Count slow calls
+      let retryCount = 0; // ✅ Count retries
       
       for (let i = 0; i < uncachedPhones.length; i++) {
         // Check timeout BEFORE processing each number
@@ -272,7 +276,11 @@ export async function processChunk(fileId, resumeFrom = 0) {
         
         const phone = uncachedPhones[i];
         
+        // ✅ Measure rate limiter wait time
+        const beforeRateLimit = Date.now();
         await blooioRateLimiter.acquire();
+        const rateLimitWait = Date.now() - beforeRateLimit;
+        totalRateLimitWait += rateLimitWait;
         
         // Retry logic for API calls
         let apiSuccess = false;
@@ -283,11 +291,25 @@ export async function processChunk(fileId, resumeFrom = 0) {
           try {
             if (retryAttempt > 0) {
               console.log(`  🔄 Retry ${retryAttempt}/${MAX_RETRIES} for ${phone.e164}`);
+              retryCount++; // ✅ Count retries
               const backoffMs = Math.pow(2, retryAttempt - 1) * 1000;
               await new Promise(resolve => setTimeout(resolve, backoffMs));
             }
             
+            // ✅ Measure individual API call time
+            const apiCallStart = Date.now();
             result = await checkBlooioSingle(phone.e164);
+            const apiCallDuration = Date.now() - apiCallStart;
+            
+            totalApiTime += apiCallDuration;
+            
+            // ✅ Log slow API calls
+            if (apiCallDuration > 500) {
+              slowApiCalls++;
+              if (slowApiCalls <= 5) { // Only log first 5 to avoid spam
+                console.warn(`  ⚠️ Slow API call: ${apiCallDuration}ms for ${phone.e164}`);
+              }
+            }
             
             if (result.error && retryAttempt < MAX_RETRIES) {
               lastError = result.error;
@@ -345,7 +367,35 @@ export async function processChunk(fileId, resumeFrom = 0) {
       }
       
       const apiDuration = ((Date.now() - apiStartTime) / 1000).toFixed(1);
+      
+      // ✅ DETAILED PERFORMANCE BREAKDOWN
+      console.log(`\n--- API PERFORMANCE BREAKDOWN ---`);
       console.log(`✓ API processing completed in ${apiDuration}s`);
+      
+      if (apiCalls > 0) {
+        const avgApiTime = (totalApiTime / apiCalls).toFixed(0);
+        const avgRateLimitWait = (totalRateLimitWait / apiCalls).toFixed(0);
+        const expectedTime = (uncachedPhones.length / 4).toFixed(1); // At 4 req/sec
+        
+        console.log(`  Total API calls: ${apiCalls}`);
+        console.log(`  Average API call time: ${avgApiTime}ms`);
+        console.log(`  Average rate limit wait: ${avgRateLimitWait}ms`);
+        console.log(`  Slow API calls (>500ms): ${slowApiCalls}`);
+        console.log(`  Total retries: ${retryCount}`);
+        console.log(`  Expected duration (at 4/sec): ${expectedTime}s`);
+        console.log(`  Actual duration: ${apiDuration}s`);
+        
+        if (parseFloat(apiDuration) > parseFloat(expectedTime) * 1.5) {
+          console.warn(`  ⚠️ SLOW: ${(parseFloat(apiDuration) / parseFloat(expectedTime)).toFixed(1)}x slower than expected`);
+          
+          if (parseInt(avgApiTime) > 500) {
+            console.warn(`     Cause: Blooio API is slow (${avgApiTime}ms avg)`);
+          }
+          if (retryCount > apiCalls * 0.1) {
+            console.warn(`     Cause: High retry rate (${retryCount} retries for ${apiCalls} calls)`);
+          }
+        }
+      }
       
       if (failedNumbers.length > 0) {
         console.warn(`⚠️ ${failedNumbers.length} numbers failed after retries`);
