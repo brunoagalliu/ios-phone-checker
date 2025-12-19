@@ -254,153 +254,141 @@ export async function processChunk(fileId, resumeFrom = 0) {
     console.log(`   Total cache hits: ${cacheHits}/${phoneNumbers.length} (${((cacheHits/phoneNumbers.length)*100).toFixed(1)}%)`);
     console.log(`   Need API calls: ${uncachedPhones.length}`);
     
-    // STEP 3: Process uncached phones with rate limiting AND retry logic
-    if (uncachedPhones.length > 0) {
-      console.log(`\n--- STEP 3: Processing ${uncachedPhones.length} uncached phones with rate limiting (4/sec) ---`);
-      
-      const apiStartTime = Date.now();
-      let totalApiTime = 0; // ✅ Track total API time
-      let totalRateLimitWait = 0; // ✅ Track rate limiter wait
-      let slowApiCalls = 0; // ✅ Count slow calls
-      let retryCount = 0; // ✅ Count retries
-      
-      for (let i = 0; i < uncachedPhones.length; i++) {
-        // Check timeout BEFORE processing each number
-        const elapsedTime = Date.now() - chunkStartTime;
-        if (elapsedTime > MAX_PROCESSING_TIME) {
-          console.warn(`⚠️ TIMEOUT PROTECTION: Stopping at ${elapsedTime}ms`);
-          console.warn(`   Processed ${apiCalls}/${uncachedPhones.length} API calls`);
-          console.warn(`   Saving partial progress to avoid function timeout`);
-          break;
-        }
-        
-        const phone = uncachedPhones[i];
-        
-        // ✅ Measure rate limiter wait time
-        const beforeRateLimit = Date.now();
-        await blooioRateLimiter.acquire();
-        const rateLimitWait = Date.now() - beforeRateLimit;
-        totalRateLimitWait += rateLimitWait;
-        
-        // Retry logic for API calls
-        let apiSuccess = false;
-        let result = null;
-        let lastError = null;
-        
-        for (let retryAttempt = 0; retryAttempt <= MAX_RETRIES; retryAttempt++) {
-          try {
-            if (retryAttempt > 0) {
-              console.log(`  🔄 Retry ${retryAttempt}/${MAX_RETRIES} for ${phone.e164}`);
-              retryCount++; // ✅ Count retries
-              const backoffMs = Math.pow(2, retryAttempt - 1) * 1000;
-              await new Promise(resolve => setTimeout(resolve, backoffMs));
-            }
-            
-            // ✅ Measure individual API call time
-            const apiCallStart = Date.now();
-            result = await checkBlooioSingle(phone.e164);
-            const apiCallDuration = Date.now() - apiCallStart;
-            
-            totalApiTime += apiCallDuration;
-            
-            // ✅ Log slow API calls
-            if (apiCallDuration > 500) {
-              slowApiCalls++;
-              if (slowApiCalls <= 5) { // Only log first 5 to avoid spam
-                console.warn(`  ⚠️ Slow API call: ${apiCallDuration}ms for ${phone.e164}`);
-              }
-            }
-            
-            if (result.error && retryAttempt < MAX_RETRIES) {
-              lastError = result.error;
-              console.log(`  ⚠️ API returned error: ${result.error}, will retry`);
-              continue;
-            }
-            
-            apiSuccess = true;
-            apiCalls++;
-            break;
-            
-          } catch (error) {
-            lastError = error.message;
-            console.error(`  ❌ Attempt ${retryAttempt + 1} failed for ${phone.e164}:`, error.message);
-            
-            if (retryAttempt === MAX_RETRIES) {
-              console.error(`  ❌ Max retries reached for ${phone.e164}, marking as failed`);
-            }
-          }
-        }
-        
-        if (apiSuccess && result) {
-          chunkResults.push({
-            phone_number: phone.original,
-            e164: phone.e164,
-            is_ios: result.is_ios,
-            supports_imessage: result.supports_imessage,
-            supports_sms: result.supports_sms,
-            contact_type: result.contact_type,
-            contact_id: result.contact_id,
-            error: result.error,
-            from_cache: false
-          });
-        } else {
-          failedNumbers.push(phone.e164);
-          
-          chunkResults.push({
-            phone_number: phone.original,
-            e164: phone.e164,
-            is_ios: false,
-            supports_imessage: false,
-            supports_sms: false,
-            contact_type: null,
-            contact_id: null,
-            error: `Failed after ${MAX_RETRIES} retries: ${lastError}`,
-            from_cache: false
-          });
-        }
-        
-        if (apiCalls % 50 === 0 && apiCalls > 0) {
-          const progressPct = ((apiCalls / uncachedPhones.length) * 100).toFixed(1);
-          const elapsed = ((Date.now() - apiStartTime) / 1000).toFixed(1);
-          console.log(`  API progress: ${apiCalls}/${uncachedPhones.length} (${progressPct}%) - ${elapsed}s elapsed`);
-        }
-      }
-      
-      const apiDuration = ((Date.now() - apiStartTime) / 1000).toFixed(1);
-      
-      // ✅ DETAILED PERFORMANCE BREAKDOWN
-      console.log(`\n--- API PERFORMANCE BREAKDOWN ---`);
-      console.log(`✓ API processing completed in ${apiDuration}s`);
-      
-      if (apiCalls > 0) {
-        const avgApiTime = (totalApiTime / apiCalls).toFixed(0);
-        const avgRateLimitWait = (totalRateLimitWait / apiCalls).toFixed(0);
-        const expectedTime = (uncachedPhones.length / 4).toFixed(1); // At 4 req/sec
-        
-        console.log(`  Total API calls: ${apiCalls}`);
-        console.log(`  Average API call time: ${avgApiTime}ms`);
-        console.log(`  Average rate limit wait: ${avgRateLimitWait}ms`);
-        console.log(`  Slow API calls (>500ms): ${slowApiCalls}`);
-        console.log(`  Total retries: ${retryCount}`);
-        console.log(`  Expected duration (at 4/sec): ${expectedTime}s`);
-        console.log(`  Actual duration: ${apiDuration}s`);
-        
-        if (parseFloat(apiDuration) > parseFloat(expectedTime) * 1.5) {
-          console.warn(`  ⚠️ SLOW: ${(parseFloat(apiDuration) / parseFloat(expectedTime)).toFixed(1)}x slower than expected`);
-          
-          if (parseInt(avgApiTime) > 500) {
-            console.warn(`     Cause: Blooio API is slow (${avgApiTime}ms avg)`);
-          }
-          if (retryCount > apiCalls * 0.1) {
-            console.warn(`     Cause: High retry rate (${retryCount} retries for ${apiCalls} calls)`);
-          }
-        }
-      }
-      
-      if (failedNumbers.length > 0) {
-        console.warn(`⚠️ ${failedNumbers.length} numbers failed after retries`);
-      }
+// STEP 3: Process uncached phones with PARALLEL API calls
+if (uncachedPhones.length > 0) {
+  console.log(`\n--- STEP 3: Processing ${uncachedPhones.length} uncached phones with ${API_KEYS.length} parallel API keys ---`);
+  
+  const apiStartTime = Date.now();
+  let totalApiTime = 0;
+  let slowApiCalls = 0;
+  let retryCount = 0;
+  
+  // ✅ PARALLEL PROCESSING - Process multiple phones at once
+  const PARALLEL_BATCH_SIZE = API_KEYS.length * 2; // Process 2 phones per key simultaneously
+  
+  for (let batchStart = 0; batchStart < uncachedPhones.length; batchStart += PARALLEL_BATCH_SIZE) {
+    // Check timeout
+    const elapsedTime = Date.now() - chunkStartTime;
+    if (elapsedTime > MAX_PROCESSING_TIME) {
+      console.warn(`⚠️ TIMEOUT PROTECTION: Stopping at ${elapsedTime}ms`);
+      console.warn(`   Processed ${apiCalls}/${uncachedPhones.length} API calls`);
+      break;
     }
+    
+    // Get batch of phones to process in parallel
+    const batch = uncachedPhones.slice(batchStart, batchStart + PARALLEL_BATCH_SIZE);
+    
+    // Process entire batch in parallel
+    const batchPromises = batch.map(async (phone) => {
+      let apiSuccess = false;
+      let result = null;
+      let lastError = null;
+      
+      for (let retryAttempt = 0; retryAttempt <= MAX_RETRIES; retryAttempt++) {
+        try {
+          if (retryAttempt > 0) {
+            retryCount++;
+            const backoffMs = Math.pow(2, retryAttempt - 1) * 1000;
+            await new Promise(resolve => setTimeout(resolve, backoffMs));
+          }
+          
+          const apiCallStart = Date.now();
+          result = await checkBlooioSingle(phone.e164);
+          const apiCallDuration = Date.now() - apiCallStart;
+          
+          totalApiTime += apiCallDuration;
+          
+          if (apiCallDuration > 500) {
+            slowApiCalls++;
+          }
+          
+          if (result.error && retryAttempt < MAX_RETRIES) {
+            lastError = result.error;
+            continue;
+          }
+          
+          apiSuccess = true;
+          break;
+          
+        } catch (error) {
+          lastError = error.message;
+          
+          if (retryAttempt === MAX_RETRIES) {
+            console.error(`  ❌ Max retries reached for ${phone.e164}`);
+          }
+        }
+      }
+      
+      return { phone, apiSuccess, result, lastError };
+    });
+    
+    // Wait for entire batch to complete
+    const batchResults = await Promise.all(batchPromises);
+    
+    // Process results
+    batchResults.forEach(({ phone, apiSuccess, result, lastError }) => {
+      if (apiSuccess && result && result.is_ios !== null) {
+        apiCalls++;
+        chunkResults.push({
+          phone_number: phone.original,
+          e164: phone.e164,
+          is_ios: result.is_ios,
+          supports_imessage: result.supports_imessage,
+          supports_sms: result.supports_sms,
+          contact_type: result.contact_type,
+          contact_id: result.contact_id,
+          error: result.error,
+          from_cache: false
+        });
+      } else {
+        failedNumbers.push(phone.e164);
+        chunkResults.push({
+          phone_number: phone.original,
+          e164: phone.e164,
+          is_ios: false,
+          supports_imessage: false,
+          supports_sms: false,
+          contact_type: null,
+          contact_id: null,
+          error: `Failed after ${MAX_RETRIES} retries: ${lastError}`,
+          from_cache: false
+        });
+      }
+    });
+    
+    // Progress logging
+    const processed = batchStart + batch.length;
+    if (processed % 50 === 0 || processed === uncachedPhones.length) {
+      const progressPct = ((processed / uncachedPhones.length) * 100).toFixed(1);
+      const elapsed = ((Date.now() - apiStartTime) / 1000).toFixed(1);
+      console.log(`  API progress: ${processed}/${uncachedPhones.length} (${progressPct}%) - ${elapsed}s elapsed`);
+    }
+  }
+  
+  const apiDuration = ((Date.now() - apiStartTime) / 1000).toFixed(1);
+  
+  console.log(`\n--- API PERFORMANCE BREAKDOWN ---`);
+  console.log(`✓ API processing completed in ${apiDuration}s`);
+  console.log(`  Using ${API_KEYS.length} parallel API keys`);
+  console.log(`  Total API calls: ${apiCalls}`);
+  console.log(`  Effective rate: ${(apiCalls / parseFloat(apiDuration)).toFixed(1)} req/sec`);
+  
+  if (apiCalls > 0) {
+    const avgApiTime = (totalApiTime / apiCalls).toFixed(0);
+    const expectedTime = (uncachedPhones.length / (API_KEYS.length * 4)).toFixed(1);
+    
+    console.log(`  Average API call time: ${avgApiTime}ms`);
+    console.log(`  Slow API calls (>500ms): ${slowApiCalls}`);
+    console.log(`  Total retries: ${retryCount}`);
+    console.log(`  Expected duration: ${expectedTime}s`);
+    console.log(`  Actual duration: ${apiDuration}s`);
+    console.log(`  Speedup: ${(190 / parseFloat(apiDuration)).toFixed(1)}x faster than single key! ⚡`);
+  }
+  
+  if (failedNumbers.length > 0) {
+    console.warn(`⚠️ ${failedNumbers.length} numbers failed after retries`);
+  }
+}
     
     const isPartialChunk = (Date.now() - chunkStartTime) > MAX_PROCESSING_TIME;
     
