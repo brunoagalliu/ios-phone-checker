@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getConnection } from '../../../lib/db.js';
-import { checkBlooioSingle, blooioRateLimiter } from '../../../lib/blooioClient.js';
+import { checkBlooioSingle, blooioRateLimiter, API_KEYS } from '../../../lib/blooioClient.js';
 import { getBatchFromAppCache, saveBatchToAppCache, getAppCacheStats } from '../../../lib/appCache.js';
 
 export const maxDuration = 300;
