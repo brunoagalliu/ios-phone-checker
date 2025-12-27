@@ -14,7 +14,11 @@
         "memory": 1024,
         "maxDuration": 300,
         "regions": ["iad1"]
+      },
+      "app/api/process-queue/route.js": {
+        "memory": 512,
+        "maxDuration": 300,
+        "regions": ["iad1"]
       }
-    },
-    "maxDuration": 60
+    }
   }
