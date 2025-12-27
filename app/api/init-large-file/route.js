@@ -1,186 +1,224 @@
 import { NextResponse } from 'next/server';
 import { parsePhoneNumber, isValidPhoneNumber } from 'libphonenumber-js';
 import { getConnection } from '../../../lib/db.js';
-import { uploadFile } from '../../../lib/blobStorage.js';
 
 export const maxDuration = 60;
 
 export async function POST(request) {
   try {
-    const formData = await request.formData();
-    const file = formData.get('file');
-    const fileName = formData.get('fileName');
-    const service = formData.get('service') || 'blooio';
-
-    if (!file) {
-      return NextResponse.json({ error: 'No file provided' }, { status: 400 });
-    }
-
-    console.log(`Initializing large file: ${fileName}`);
-    console.log(`Service: ${service}`);
-
-    // Read and parse CSV
-    const fileBuffer = await file.arrayBuffer();
-    const fileContent = Buffer.from(fileBuffer).toString('utf-8');
-    const lines = fileContent.split('\n').map(line => line.trim()).filter(line => line);
-
-    console.log(`Total lines in file: ${lines.length}`);
-
-    // Parse and validate phone numbers
-    const validPhones = [];
-    const invalidPhones = [];
-    const duplicatePhones = [];
-    const seenNumbers = new Set();
-
-    // Skip header if exists
-    const startIndex = lines[0].match(/phone|number|mobile/i) ? 1 : 0;
-
-    for (let i = startIndex; i < lines.length; i++) {
-      const line = lines[i];
-      const phoneNumber = line.split(',')[0].trim();
-
-      if (!phoneNumber) continue;
-
-      try {
-        if (isValidPhoneNumber(phoneNumber, 'US')) {
-          const parsed = parsePhoneNumber(phoneNumber, 'US');
-          const e164 = parsed.format('E.164');
-
-          if (seenNumbers.has(e164)) {
-            duplicatePhones.push(phoneNumber);
-          } else {
-            seenNumbers.add(e164);
-            validPhones.push({
-              original: phoneNumber,
-              e164: e164
-            });
-          }
-        } else {
-          invalidPhones.push(phoneNumber);
-        }
-      } catch (error) {
-        invalidPhones.push(phoneNumber);
+    const contentType = request.headers.get('content-type');
+    
+    // Handle chunked upload (from FileUploader component)
+    if (contentType?.includes('application/json')) {
+      const { fileId, service } = await request.json();
+      
+      console.log(`📋 Initializing chunked upload file ${fileId} for ${service}`);
+      
+      const connection = await getConnection();
+      
+      // Get file info
+      const [files] = await connection.execute(
+        `SELECT * FROM uploaded_files WHERE id = ?`,
+        [fileId]
+      );
+      
+      if (files.length === 0) {
+        throw new Error('File not found');
       }
-    }
-
-    console.log(`Valid: ${validPhones.length}, Invalid: ${invalidPhones.length}, Duplicates: ${duplicatePhones.length}`);
-
-    if (validPhones.length === 0) {
-      return NextResponse.json({
-        error: 'No valid phone numbers found in file'
-      }, { status: 400 });
-    }
-
-    // Upload original file to blob storage
-    const originalBlob = await uploadFile(fileBuffer, fileName, 'uploads');
-
-    // Generate batch ID
-    const batchId = `batch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-    // Create processing state
-    const processingState = {
-      validPhones: validPhones,
-      batchId: batchId,
-      fileName: fileName,
-      service: service,
-      uploadedAt: new Date().toISOString()
-    };
-
-    // Save to database
-    const connection = await getConnection();
-
-    const totalNumbers = lines.length - startIndex;
-    const validCount = validPhones.length;
-    const invalidCount = invalidPhones.length;
-    const duplicateCount = duplicatePhones.length;
-    const originalFileName = fileName;
-
-    await connection.execute(
-      `INSERT INTO uploaded_files (
-        file_name, original_name, batch_id, total_numbers, 
-        valid_numbers, invalid_numbers, duplicate_numbers,
-        processing_status, processing_offset, processing_total,
-        processing_progress, processing_state, can_resume, 
-        original_file_url, upload_date
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [
-        fileName,
-        originalFileName,
-        batchId,
-        totalNumbers,
-        validCount,
-        invalidCount,
-        duplicateCount,
-        'initialized',
-        0,
-        validCount,
-        0,
-        JSON.stringify(processingState),
-        1, // ✅ can_resume = 1
-        originalBlob.url
-      ]
-    );
-
-    const [result] = await connection.execute(
-      'SELECT LAST_INSERT_ID() as fileId'
-    );
-
-    const fileId = result[0].fileId;
-
-    console.log(`✓ File initialized with ID: ${fileId}`);
-
-    // ✅ AUTO-TRIGGER FIRST CHUNK
-    console.log('🚀 Auto-triggering first chunk...');
-
-    //const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://ios.smsapp.co';
+      
+      const file = files[0];
+      
+      if (file.upload_status !== 'completed') {
+        throw new Error('File upload not completed');
+      }
+      
+      console.log(`✓ File found: ${file.file_name}`);
+      console.log(`✓ Records: ${file.processing_total}`);
+      console.log(`✓ Service: ${file.service}`);
+      
+      // Trigger processing queue
+      try {
+            //const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://ios.smsapp.co';
 
     const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
     const host = request.headers.get('host') || 'ios.smsapp.co';
     const baseUrl = `${protocol}://${host}`;
-
-
-    // Trigger processing without waiting
-    fetch(`${baseUrl}/api/check-batch-blooio-chunked`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        fileId: fileId, 
-        resumeFrom: 0 
-      })
-    }).catch(err => {
-      console.error('Auto-trigger failed:', err.message);
-      // Not critical - cron will pick it up
-    });
-
-    console.log('✓ First chunk triggered');
-
-    // Calculate estimates
-    const chunkSize = service === 'blooio' ? 250 : 1000;
-    const totalChunks = Math.ceil(validCount / chunkSize);
-    const estimatedMinutes = Math.ceil(totalChunks * 0.5); // Assume 30s per chunk avg
-
+        
+        await fetch(`${baseUrl}/api/process-queue`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        });
+        
+        console.log('✓ Processing queue triggered');
+      } catch (triggerError) {
+        console.warn('⚠️ Could not trigger queue (will be picked up by cron):', triggerError.message);
+      }
+      
+      return NextResponse.json({
+        success: true,
+        fileId: fileId,
+        totalRecords: file.processing_total,
+        service: file.service,
+        message: 'Processing started'
+      });
+    }
+    
+    // Handle direct upload (small files via FormData)
+    const formData = await request.formData();
+    const file = formData.get('file');
+    const service = formData.get('service') || 'blooio';
+    
+    if (!file) {
+      return NextResponse.json({
+        success: false,
+        error: 'No file provided'
+      }, { status: 400 });
+    }
+    
+    console.log(`\n=== PROCESSING FILE ===`);
+    console.log(`File: ${file.name}`);
+    console.log(`Size: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
+    console.log(`Service: ${service}`);
+    
+    // Read file content
+    const fileContent = await file.text();
+    const lines = fileContent.trim().split('\n');
+    
+    if (lines.length < 2) {
+      return NextResponse.json({
+        success: false,
+        error: 'File must contain at least a header and one data row'
+      }, { status: 400 });
+    }
+    
+    const header = lines[0].trim();
+    const dataLines = lines.slice(1);
+    
+    console.log(`Header: ${header}`);
+    console.log(`Total lines: ${dataLines.length}`);
+    
+    // Validate and normalize phone numbers
+    const validPhones = [];
+    const invalidPhones = [];
+    
+    for (let i = 0; i < dataLines.length; i++) {
+      const line = dataLines[i].trim();
+      if (!line) continue;
+      
+      const parts = line.split(',');
+      const phoneNumber = parts[0].trim();
+      
+      try {
+        if (!phoneNumber) {
+          invalidPhones.push({ line: i + 2, phone: phoneNumber, reason: 'Empty' });
+          continue;
+        }
+        
+        if (isValidPhoneNumber(phoneNumber)) {
+          const parsed = parsePhoneNumber(phoneNumber);
+          const e164 = parsed.format('E.164');
+          validPhones.push({
+            original: phoneNumber,
+            e164: e164
+          });
+        } else {
+          invalidPhones.push({ line: i + 2, phone: phoneNumber, reason: 'Invalid format' });
+        }
+      } catch (error) {
+        invalidPhones.push({ line: i + 2, phone: phoneNumber, reason: error.message });
+      }
+    }
+    
+    console.log(`✓ Valid phones: ${validPhones.length}`);
+    console.log(`✗ Invalid phones: ${invalidPhones.length}`);
+    
+    if (validPhones.length === 0) {
+      return NextResponse.json({
+        success: false,
+        error: 'No valid phone numbers found in file',
+        invalidCount: invalidPhones.length,
+        invalidSamples: invalidPhones.slice(0, 10)
+      }, { status: 400 });
+    }
+    
+    // Save to database
+    const connection = await getConnection();
+    
+    const [result] = await connection.execute(
+      `INSERT INTO uploaded_files 
+       (file_name, upload_status, processing_status, service, 
+        upload_date, processing_total, processing_offset, processing_progress)
+       VALUES (?, 'completed', 'initialized', ?, NOW(), ?, 0, 0)`,
+      [file.name, service, validPhones.length]
+    );
+    
+    const fileId = result.insertId;
+    
+    console.log(`✓ File saved with ID: ${fileId}`);
+    
+    // Create processing chunks
+    const CHUNK_SIZE = service === 'blooio' ? 500 : 1000;
+    const chunks = [];
+    
+    for (let i = 0; i < validPhones.length; i += CHUNK_SIZE) {
+      const chunkPhones = validPhones.slice(i, i + CHUNK_SIZE);
+      chunks.push({
+        file_id: fileId,
+        chunk_offset: i,
+        chunk_data: JSON.stringify(chunkPhones),
+        chunk_status: 'pending'
+      });
+    }
+    
+    console.log(`Creating ${chunks.length} processing chunks...`);
+    
+    // Batch insert chunks
+    if (chunks.length > 0) {
+      const values = chunks.map(chunk => 
+        `(${chunk.file_id}, ${chunk.chunk_offset}, '${chunk.chunk_data.replace(/'/g, "''")}', '${chunk.chunk_status}')`
+      ).join(',');
+      
+      await connection.execute(
+        `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
+         VALUES ${values}`
+      );
+      
+      console.log(`✓ ${chunks.length} chunks created`);
+    }
+    
+    // Trigger processing
+    try {
+      const baseUrl = process.env.VERCEL_URL 
+        ? `https://${process.env.VERCEL_URL}` 
+        : 'http://localhost:3000';
+      
+      await fetch(`${baseUrl}/api/process-queue`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      
+      console.log('✓ Processing queue triggered');
+    } catch (triggerError) {
+      console.warn('⚠️ Could not trigger queue:', triggerError.message);
+    }
+    
     return NextResponse.json({
       success: true,
       fileId: fileId,
-      batchId: batchId,
-      fileName: fileName,
-      totalRecords: validCount,
-      totalNumbers: totalNumbers,
-      validNumbers: validCount,
-      invalidNumbers: invalidCount,
-      duplicateNumbers: duplicateCount,
-      chunkSize: chunkSize,
-      totalChunks: totalChunks,
-      estimatedTime: `${estimatedMinutes} minutes`,
-      message: 'File initialized and processing started automatically',
-      originalFileUrl: originalBlob.url
+      fileName: file.name,
+      totalRecords: validPhones.length,
+      invalidRecords: invalidPhones.length,
+      chunks: chunks.length,
+      service: service,
+      message: `File initialized with ${validPhones.length} valid phone numbers`
     });
-
+    
   } catch (error) {
     console.error('Init large file error:', error);
     return NextResponse.json({
       success: false,
-      error: error.message
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     }, { status: 500 });
   }
 }

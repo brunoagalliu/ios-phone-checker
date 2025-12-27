@@ -4,5 +4,17 @@
         "path": "/api/process-queue",
         "schedule": "* * * * *"
       }
-    ]
+    ],
+    "functions": {
+      "app/api/upload-chunk/route.js": {
+        "memory": 1024,
+        "maxDuration": 60
+      },
+      "app/api/check-batch-blooio-chunked/route.js": {
+        "memory": 1024,
+        "maxDuration": 300,
+        "regions": ["iad1"]
+      }
+    },
+    "maxDuration": 60
   }

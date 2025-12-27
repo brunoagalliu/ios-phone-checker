@@ -1,210 +1,367 @@
-'use client';
-
 import { useState } from 'react';
 
-export default function FileUploader({ onFilesSelected, disabled }) {
-  const [selectedService, setSelectedService] = useState('blooio'); // 'blooio' or 'subscriberverify'
-  
-  const handleFileUpload = (event) => {
-    const files = Array.from(event.target.files);
-    onFilesSelected(files, selectedService);
-  };
+export default function FileUploader() {
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [selectedService, setSelectedService] = useState('blooio');
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStatus, setUploadStatus] = useState('idle'); // idle, uploading, processing, complete, error
+  const [uploadMessage, setUploadMessage] = useState('');
 
-  const handleDrop = (event) => {
-    event.preventDefault();
-    const files = Array.from(event.dataTransfer.files).filter(
-      file => file.type === 'text/csv'
-    );
-    if (files.length > 0) {
-      onFilesSelected(files, selectedService);
+  // Handle file selection
+  const handleFileChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setSelectedFile(file);
+      setUploadStatus('idle');
+      setUploadProgress(0);
+      setUploadMessage('');
     }
   };
 
-  const handleDragOver = (event) => {
-    event.preventDefault();
+  // Handle service selection
+  const handleServiceChange = (e) => {
+    setSelectedService(e.target.value);
+  };
+
+  // Chunked upload for large files (> 5 MB)
+  const handleLargeFileUpload = async (file, service) => {
+    const CHUNK_SIZE = 1 * 1024 * 1024; // 1 MB chunks
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    
+    console.log(`📂 Uploading ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
+    console.log(`📦 Total chunks: ${totalChunks}`);
+    
+    setUploadProgress(0);
+    setUploadStatus('uploading');
+    setUploadMessage(`Uploading in ${totalChunks} chunks...`);
+    
+    let uploadId = null;
+    
+    try {
+      // Read file as text
+      const fileText = await file.text();
+      
+      // Upload chunks
+      for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+        const start = chunkIndex * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, fileText.length);
+        const chunkData = fileText.slice(start, end);
+        
+        const formData = new FormData();
+        formData.append('fileName', file.name);
+        formData.append('service', service);
+        formData.append('chunkIndex', chunkIndex);
+        formData.append('totalChunks', totalChunks);
+        formData.append('chunk', chunkData);
+        
+        if (uploadId) {
+          formData.append('uploadId', uploadId);
+        }
+        
+        console.log(`📤 Uploading chunk ${chunkIndex + 1}/${totalChunks}...`);
+        
+        const response = await fetch('/api/upload-chunk', {
+          method: 'POST',
+          body: formData
+        });
+        
+        if (!response.ok) {
+          throw new Error(`Chunk ${chunkIndex + 1} failed: ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        
+        if (!data.success) {
+          throw new Error(data.error);
+        }
+        
+        // Save uploadId from first chunk
+        if (chunkIndex === 0) {
+          uploadId = data.uploadId;
+        }
+        
+        // Update progress
+        const progress = ((chunkIndex + 1) / totalChunks * 100).toFixed(1);
+        setUploadProgress(parseFloat(progress));
+        setUploadMessage(`Uploading chunk ${chunkIndex + 1}/${totalChunks} (${progress}%)`);
+        
+        console.log(`✓ Chunk ${chunkIndex + 1}/${totalChunks} uploaded (${progress}%)`);
+        
+        // Check if complete
+        if (data.complete) {
+          console.log(`✅ Upload complete! File ID: ${uploadId}`);
+          console.log(`📊 Total records: ${data.totalRecords}`);
+          
+          setUploadStatus('processing');
+          setUploadMessage('Upload complete! Initializing processing...');
+          
+          // Initialize processing
+          const initResponse = await fetch('/api/init-large-file', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fileId: uploadId,
+              service: service
+            })
+          });
+          
+          const initData = await initResponse.json();
+          
+          if (initData.success) {
+            setUploadStatus('complete');
+            setUploadProgress(100);
+            setUploadMessage(`✅ Success! File ID: ${uploadId} | Records: ${data.totalRecords.toLocaleString()}`);
+            alert(`✅ File uploaded successfully!\n\nFile ID: ${uploadId}\nRecords: ${data.totalRecords.toLocaleString()}\n\nProcessing started!`);
+          } else {
+            throw new Error(`Failed to initialize: ${initData.error}`);
+          }
+          
+          break;
+        }
+      }
+      
+    } catch (error) {
+      console.error('Upload error:', error);
+      setUploadStatus('error');
+      setUploadMessage(`❌ Error: ${error.message}`);
+      alert(`❌ Upload failed: ${error.message}`);
+    }
+  };
+
+  // Small file upload (existing method for files < 5 MB)
+  const handleSmallFileUpload = async (file, service) => {
+    setUploadStatus('uploading');
+    setUploadProgress(0);
+    setUploadMessage('Uploading file...');
+    
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('service', service);
+      
+      const response = await fetch('/api/init-large-file', {
+        method: 'POST',
+        body: formData
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      
+      if (data.success) {
+        setUploadStatus('complete');
+        setUploadProgress(100);
+        setUploadMessage(`✅ Success! File ID: ${data.fileId} | Records: ${data.totalRecords.toLocaleString()}`);
+        alert(`✅ File uploaded successfully!\n\nFile ID: ${data.fileId}\nRecords: ${data.totalRecords.toLocaleString()}\n\nProcessing started!`);
+      } else {
+        throw new Error(data.error || 'Upload failed');
+      }
+      
+    } catch (error) {
+      console.error('Upload error:', error);
+      setUploadStatus('error');
+      setUploadMessage(`❌ Error: ${error.message}`);
+      alert(`❌ Upload failed: ${error.message}`);
+    }
+  };
+
+  // Main upload handler
+  const handleUpload = async () => {
+    if (!selectedFile) {
+      alert('Please select a file first');
+      return;
+    }
+    
+    const fileSizeMB = selectedFile.size / 1024 / 1024;
+    
+    console.log(`File size: ${fileSizeMB.toFixed(2)} MB`);
+    
+    // Use chunked upload for files > 5 MB
+    if (fileSizeMB > 5) {
+      console.log(`📦 Large file detected - using chunked upload`);
+      await handleLargeFileUpload(selectedFile, selectedService);
+    } else {
+      console.log(`📄 Small file - using direct upload`);
+      await handleSmallFileUpload(selectedFile, selectedService);
+    }
   };
 
   return (
     <div style={styles.container}>
-      <label style={styles.label}>Upload CSV Files (Multiple)</label>
+      <h2>📤 Upload Phone Numbers</h2>
       
       {/* Service Selection */}
-      <div style={styles.serviceSelector}>
-        <div style={styles.serviceSelectorTitle}>Choose Validation Service:</div>
-        
-        <div style={styles.serviceOptions}>
-          <label style={{
-            ...styles.serviceOption,
-            ...(selectedService === 'blooio' ? styles.serviceOptionActive : {})
-          }}>
-            <input
-              type="radio"
-              name="service"
-              value="blooio"
-              checked={selectedService === 'blooio'}
-              onChange={(e) => setSelectedService(e.target.value)}
-              style={styles.radio}
-            />
-            <div style={styles.serviceContent}>
-              <div style={styles.serviceName}>📱 Blooio</div>
-              <div style={styles.serviceDescription}>
-                iOS/iMessage Detection • 4 req/sec • $0.01/check
-              </div>
-              <div style={styles.serviceFeatures}>
-                ✓ Detects iOS devices<br/>
-                ✓ iMessage support check<br/>
-                ✓ SMS capability check
-              </div>
-            </div>
-          </label>
-
-          <label style={{
-            ...styles.serviceOption,
-            ...(selectedService === 'subscriberverify' ? styles.serviceOptionActive : {})
-          }}>
-            <input
-              type="radio"
-              name="service"
-              value="subscriberverify"
-              checked={selectedService === 'subscriberverify'}
-              onChange={(e) => setSelectedService(e.target.value)}
-              style={styles.radio}
-            />
-            <div style={styles.serviceContent}>
-              <div style={styles.serviceName}>✅ SubscriberVerify</div>
-              <div style={styles.serviceDescription}>
-                Phone Validation • 1000/request • Bulk processing
-              </div>
-              <div style={styles.serviceFeatures}>
-                ✓ Valid/invalid detection<br/>
-                ✓ Carrier identification<br/>
-                ✓ Deactivation check<br/>
-                ✓ Litigator detection<br/>
-                ✓ Geographic data
-              </div>
-            </div>
-          </label>
-        </div>
+      <div style={styles.section}>
+        <label style={styles.label}>
+          Select Service:
+          <select 
+            value={selectedService} 
+            onChange={handleServiceChange}
+            style={styles.select}
+            disabled={uploadStatus === 'uploading'}
+          >
+            <option value="blooio">Blooio</option>
+            <option value="other">Other Service</option>
+          </select>
+        </label>
       </div>
       
-      <div
-        style={styles.uploadZone}
-        onClick={() => !disabled && document.getElementById('fileInput').click()}
-        onDrop={handleDrop}
-        onDragOver={handleDragOver}
-      >
-        <div style={styles.uploadIcon}>📄</div>
-        <div style={styles.uploadText}>
-          Click or drag multiple CSV files here
-        </div>
-        <div style={styles.uploadHint}>
-          Upload multiple CSV files at once
-        </div>
+      {/* File Selection */}
+      <div style={styles.section}>
+        <label style={styles.label}>
+          Choose CSV File:
+          <input 
+            type="file" 
+            accept=".csv" 
+            onChange={handleFileChange}
+            style={styles.fileInput}
+            disabled={uploadStatus === 'uploading'}
+          />
+        </label>
       </div>
-      <input
-        id="fileInput"
-        type="file"
-        accept=".csv"
-        multiple
-        onChange={handleFileUpload}
-        style={{ display: 'none' }}
-        disabled={disabled}
-      />
+      
+      {/* File Info */}
+      {selectedFile && (
+        <div style={styles.fileInfo}>
+          <div>📄 {selectedFile.name}</div>
+          <div>📊 {(selectedFile.size / 1024 / 1024).toFixed(2)} MB</div>
+        </div>
+      )}
+      
+      {/* Upload Button */}
+      <button 
+        onClick={handleUpload}
+        disabled={!selectedFile || uploadStatus === 'uploading'}
+        style={{
+          ...styles.button,
+          opacity: (!selectedFile || uploadStatus === 'uploading') ? 0.5 : 1
+        }}
+      >
+        {uploadStatus === 'uploading' ? '⏳ Uploading...' : '🚀 Upload & Process'}
+      </button>
+      
+      {/* Progress Bar */}
+      {uploadStatus !== 'idle' && (
+        <div style={styles.progressSection}>
+          <div style={styles.progressBar}>
+            <div 
+              style={{
+                ...styles.progressFill,
+                width: `${uploadProgress}%`,
+                background: uploadStatus === 'error' 
+                  ? 'linear-gradient(90deg, #f87171 0%, #dc2626 100%)'
+                  : uploadStatus === 'complete'
+                  ? 'linear-gradient(90deg, #34d399 0%, #10b981 100%)'
+                  : 'linear-gradient(90deg, #667eea 0%, #764ba2 100%)'
+              }}
+            />
+          </div>
+          <div style={styles.progressText}>
+            {uploadProgress.toFixed(1)}%
+          </div>
+        </div>
+      )}
+      
+      {/* Status Message */}
+      {uploadMessage && (
+        <div style={{
+          ...styles.message,
+          color: uploadStatus === 'error' ? '#dc2626' : 
+                 uploadStatus === 'complete' ? '#10b981' : '#667eea'
+        }}>
+          {uploadMessage}
+        </div>
+      )}
     </div>
   );
 }
 
 const styles = {
   container: {
-    marginBottom: '20px',
+    maxWidth: '600px',
+    margin: '40px auto',
+    padding: '30px',
+    background: '#ffffff',
+    borderRadius: '12px',
+    boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
+  },
+  section: {
+    marginBottom: '20px'
   },
   label: {
     display: 'block',
     marginBottom: '8px',
-    color: '#555',
     fontWeight: '500',
-    fontSize: '14px',
+    color: '#374151'
   },
-  serviceSelector: {
-    background: '#f8f9fa',
-    padding: '20px',
-    borderRadius: '12px',
-    marginBottom: '20px',
-    border: '2px solid #e0e0e0',
+  select: {
+    width: '100%',
+    padding: '10px',
+    marginTop: '5px',
+    borderRadius: '8px',
+    border: '2px solid #e5e7eb',
+    fontSize: '16px'
   },
-  serviceSelectorTitle: {
-    fontSize: '15px',
-    fontWeight: '600',
-    color: '#333',
-    marginBottom: '15px',
+  fileInput: {
+    width: '100%',
+    padding: '10px',
+    marginTop: '5px'
   },
-  serviceOptions: {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
-    gap: '15px',
-  },
-  serviceOption: {
-    display: 'flex',
-    alignItems: 'flex-start',
+  fileInfo: {
     padding: '15px',
-    background: 'white',
-    border: '2px solid #dee2e6',
-    borderRadius: '10px',
-    cursor: 'pointer',
-    transition: 'all 0.3s',
+    background: '#f3f4f6',
+    borderRadius: '8px',
+    marginBottom: '20px',
+    fontSize: '14px',
+    color: '#6b7280'
   },
-  serviceOptionActive: {
-    borderColor: '#667eea',
-    background: '#f0f4ff',
-    boxShadow: '0 4px 12px rgba(102, 126, 234, 0.2)',
-  },
-  radio: {
-    marginRight: '12px',
-    marginTop: '3px',
-    width: '18px',
-    height: '18px',
-    cursor: 'pointer',
-  },
-  serviceContent: {
-    flex: 1,
-  },
-  serviceName: {
-    fontSize: '16px',
+  button: {
+    width: '100%',
+    padding: '15px',
+    background: 'linear-gradient(90deg, #667eea 0%, #764ba2 100%)',
+    color: 'white',
+    border: 'none',
+    borderRadius: '8px',
+    fontSize: '18px',
     fontWeight: '600',
-    color: '#333',
-    marginBottom: '5px',
-  },
-  serviceDescription: {
-    fontSize: '13px',
-    color: '#666',
-    marginBottom: '8px',
-  },
-  serviceFeatures: {
-    fontSize: '12px',
-    color: '#555',
-    lineHeight: '1.6',
-  },
-  uploadZone: {
-    border: '3px dashed #d0d0d0',
-    borderRadius: '15px',
-    padding: '40px',
-    textAlign: 'center',
-    background: '#fafafa',
     cursor: 'pointer',
-    transition: 'all 0.3s',
+    transition: 'opacity 0.2s'
   },
-  uploadIcon: {
-    fontSize: '48px',
-    marginBottom: '15px',
+  progressSection: {
+    marginTop: '20px'
   },
-  uploadText: {
-    fontSize: '16px',
-    color: '#333',
-    marginBottom: '5px',
+  progressBar: {
+    width: '100%',
+    height: '30px',
+    background: '#e5e7eb',
+    borderRadius: '15px',
+    overflow: 'hidden',
+    marginBottom: '10px'
+  },
+  progressFill: {
+    height: '100%',
+    transition: 'width 0.3s ease',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    color: 'white',
+    fontWeight: '600'
+  },
+  progressText: {
+    textAlign: 'center',
+    fontSize: '18px',
+    fontWeight: '600',
+    color: '#374151'
+  },
+  message: {
+    marginTop: '15px',
+    padding: '12px',
+    background: '#f3f4f6',
+    borderRadius: '8px',
+    fontSize: '14px',
     fontWeight: '500',
-  },
-  uploadHint: {
-    fontSize: '13px',
-    color: '#666',
-  },
+    textAlign: 'center'
+  }
 };
