@@ -110,11 +110,12 @@ export async function POST(request) {
       
       console.log(`📄 Header: ${header}`);
       console.log(`📄 Data lines: ${dataLines.length}`);
-
+      
+      // Show first 5 data lines for debugging
       console.log(`📄 First 5 data lines:`);
-for (let i = 0; i < Math.min(5, dataLines.length); i++) {
-  console.log(`   Line ${i + 1}: "${dataLines[i]}"`);
-}
+      for (let i = 0; i < Math.min(5, dataLines.length); i++) {
+        console.log(`   Line ${i + 1}: "${dataLines[i]}"`);
+      }
       
       // Parse phone numbers
       const { parsePhoneNumber, isValidPhoneNumber } = await import('libphonenumber-js');
@@ -128,7 +129,7 @@ for (let i = 0; i < Math.min(5, dataLines.length); i++) {
         if (!line) continue;
         
         const parts = line.split(',');
-        const phoneNumber = parts[0].trim();
+        let phoneNumber = parts[0].trim(); // Remove trailing spaces
         
         try {
           if (!phoneNumber) {
@@ -136,37 +137,68 @@ for (let i = 0; i < Math.min(5, dataLines.length); i++) {
               console.log(`❌ Line ${i + 1}: Empty phone number`);
               sampleErrorsShown++;
             }
-            invalidPhones.push({ line: i + 1, phone: phoneNumber, reason: 'Empty' });
+            if (invalidPhones.length < 1000) {
+              invalidPhones.push({ line: i + 1, phone: phoneNumber, reason: 'Empty' });
+            }
             continue;
           }
           
-          if (isValidPhoneNumber(phoneNumber)) {
-            const parsed = parsePhoneNumber(phoneNumber);
+          // Clean the phone number
+          // Remove any non-digit characters except +
+          let cleanedPhone = phoneNumber.replace(/[^\d+]/g, '');
+          
+          // If it's a 10-digit US number, add +1
+          if (cleanedPhone.length === 10 && !cleanedPhone.startsWith('+')) {
+            cleanedPhone = '+1' + cleanedPhone;
+          }
+          // If it's an 11-digit number starting with 1, add +
+          else if (cleanedPhone.length === 11 && cleanedPhone.startsWith('1') && !cleanedPhone.startsWith('+')) {
+            cleanedPhone = '+' + cleanedPhone;
+          }
+          // If no + at all, add it
+          else if (!cleanedPhone.startsWith('+')) {
+            cleanedPhone = '+' + cleanedPhone;
+          }
+          
+          // Validate the cleaned phone number
+          if (isValidPhoneNumber(cleanedPhone)) {
+            const parsed = parsePhoneNumber(cleanedPhone);
             validPhones.push({
-              original: phoneNumber,
+              original: phoneNumber, // Keep original from file
               e164: parsed.format('E.164')
             });
           } else {
             if (sampleErrorsShown < 5) {
-              console.log(`❌ Line ${i + 1}: Invalid format - "${phoneNumber}"`);
+              console.log(`❌ Line ${i + 1}: Invalid after cleaning - Original: "${phoneNumber}" Cleaned: "${cleanedPhone}"`);
               sampleErrorsShown++;
             }
-            invalidPhones.push({ line: i + 1, phone: phoneNumber, reason: 'Invalid format' });
+            if (invalidPhones.length < 1000) {
+              invalidPhones.push({ line: i + 1, phone: phoneNumber, reason: 'Invalid format' });
+            }
           }
         } catch (error) {
           if (sampleErrorsShown < 5) {
             console.log(`❌ Line ${i + 1}: Parse error - "${phoneNumber}" - ${error.message}`);
             sampleErrorsShown++;
           }
-          invalidPhones.push({ line: i + 1, phone: phoneNumber, reason: error.message });
+          if (invalidPhones.length < 1000) {
+            invalidPhones.push({ line: i + 1, phone: phoneNumber, reason: error.message });
+          }
         }
       }
       
       console.log(`✓ Valid phones: ${validPhones.length}`);
       console.log(`✗ Invalid phones: ${invalidPhones.length}`);
       
-      if (invalidPhones.length > 0 && invalidPhones.length < 10) {
-        console.log(`Invalid samples:`, invalidPhones);
+      if (validPhones.length > 0) {
+        console.log(`✓ Sample valid phones (first 3):`);
+        for (let i = 0; i < Math.min(3, validPhones.length); i++) {
+          console.log(`   ${validPhones[i].original} → ${validPhones[i].e164}`);
+        }
+      }
+      
+      if (invalidPhones.length > 0 && invalidPhones.length < 20) {
+        console.log(`✗ Invalid phone samples:`, invalidPhones.slice(0, 10));
       }
       
       if (validPhones.length === 0) {
