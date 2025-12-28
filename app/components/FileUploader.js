@@ -1,17 +1,20 @@
 'use client';
-import { useState } from 'react';
+
+import { useState, useRef } from 'react';
 
 export default function FileUploader() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [selectedService, setSelectedService] = useState('blooio');
   const [uploadProgress, setUploadProgress] = useState(0);
-  const [uploadStatus, setUploadStatus] = useState('idle'); // idle, uploading, processing, complete, error
+  const [uploadStatus, setUploadStatus] = useState('idle');
   const [uploadMessage, setUploadMessage] = useState('');
+  
+  const fileInputRef = useRef(null); // ✅ Add ref to file input
 
-  // Handle file selection
   const handleFileChange = (e) => {
     const file = e.target.files[0];
     if (file) {
+      console.log('📁 File selected:', file.name, 'Size:', file.size, 'bytes');
       setSelectedFile(file);
       setUploadStatus('idle');
       setUploadProgress(0);
@@ -19,14 +22,12 @@ export default function FileUploader() {
     }
   };
 
-  // Handle service selection
   const handleServiceChange = (e) => {
     setSelectedService(e.target.value);
   };
 
-  // Chunked upload for large files (> 5 MB)
   const handleLargeFileUpload = async (file, service) => {
-    const LINES_PER_CHUNK = 50000; // 50k lines per chunk instead of 1MB
+    const LINES_PER_CHUNK = 50000;
     
     console.log(`📂 Uploading ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
     
@@ -37,7 +38,6 @@ export default function FileUploader() {
     let uploadId = null;
     
     try {
-      // Read entire file as text
       const fileText = await file.text();
       const allLines = fileText.trim().split('\n');
       
@@ -47,8 +47,6 @@ export default function FileUploader() {
       
       const header = allLines[0];
       const dataLines = allLines.slice(1);
-      
-      // Calculate chunks based on lines
       const totalChunks = Math.ceil(dataLines.length / LINES_PER_CHUNK);
       
       console.log(`📦 Total lines: ${dataLines.length.toLocaleString()}`);
@@ -56,13 +54,11 @@ export default function FileUploader() {
       
       setUploadMessage(`Uploading ${totalChunks} chunks...`);
       
-      // Upload chunks
       for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
         const start = chunkIndex * LINES_PER_CHUNK;
         const end = Math.min(start + LINES_PER_CHUNK, dataLines.length);
         const chunkLines = dataLines.slice(start, end);
         
-        // Include header in first chunk only
         let chunkData;
         if (chunkIndex === 0) {
           chunkData = header + '\n' + chunkLines.join('\n');
@@ -82,7 +78,7 @@ export default function FileUploader() {
           formData.append('uploadId', uploadId);
         }
         
-        console.log(`📤 Uploading chunk ${chunkIndex + 1}/${totalChunks} (${chunkLines.length.toLocaleString()} lines)...`);
+        console.log(`📤 Uploading chunk ${chunkIndex + 1}/${totalChunks}...`);
         
         const response = await fetch('/api/upload-chunk', {
           method: 'POST',
@@ -99,19 +95,16 @@ export default function FileUploader() {
           throw new Error(data.error);
         }
         
-        // Save uploadId from first chunk
         if (chunkIndex === 0) {
           uploadId = data.uploadId;
         }
         
-        // Update progress
         const progress = ((chunkIndex + 1) / totalChunks * 100).toFixed(1);
         setUploadProgress(parseFloat(progress));
         setUploadMessage(`Uploading chunk ${chunkIndex + 1}/${totalChunks} (${progress}%)`);
         
         console.log(`✓ Chunk ${chunkIndex + 1}/${totalChunks} uploaded (${progress}%)`);
         
-        // Check if complete
         if (data.complete) {
           console.log(`✅ Upload complete! File ID: ${uploadId}`);
           console.log(`📊 Total records: ${data.totalRecords.toLocaleString()}`);
@@ -119,7 +112,6 @@ export default function FileUploader() {
           setUploadStatus('processing');
           setUploadMessage('Upload complete! Initializing processing...');
           
-          // Initialize processing
           const initResponse = await fetch('/api/init-large-file', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -152,27 +144,47 @@ export default function FileUploader() {
     }
   };
 
-  // Small file upload (existing method for files < 5 MB)
   const handleSmallFileUpload = async (file, service) => {
     setUploadStatus('uploading');
     setUploadProgress(0);
     setUploadMessage('Uploading file...');
     
     try {
+      console.log('📤 Small file upload starting...');
+      console.log('  File:', file.name);
+      console.log('  Size:', file.size, 'bytes');
+      console.log('  Type:', file.type);
+      
+      if (!file || file.size === 0) {
+        throw new Error('File is empty or not properly selected');
+      }
+      
       const formData = new FormData();
       formData.append('file', file);
       formData.append('service', service);
+      
+      console.log('📦 Sending request to /api/init-large-file...');
       
       const response = await fetch('/api/init-large-file', {
         method: 'POST',
         body: formData
       });
       
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      console.log('📬 Response status:', response.status);
+      
+      const responseText = await response.text();
+      console.log('📄 Response text:', responseText);
+      
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch (e) {
+        throw new Error(`Server returned invalid JSON: ${responseText.substring(0, 200)}`);
       }
       
-      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || `HTTP ${response.status}: ${response.statusText}`);
+      }
       
       if (data.success) {
         setUploadStatus('complete');
@@ -184,114 +196,153 @@ export default function FileUploader() {
       }
       
     } catch (error) {
-      console.error('Upload error:', error);
+      console.error('❌ Upload error:', error);
       setUploadStatus('error');
       setUploadMessage(`❌ Error: ${error.message}`);
       alert(`❌ Upload failed: ${error.message}`);
     }
   };
 
-  // Main upload handler
   const handleUpload = async () => {
-    if (!selectedFile) {
+    // ✅ Get fresh file reference from input
+    const file = fileInputRef.current?.files[0];
+    
+    if (!file) {
       alert('Please select a file first');
       return;
     }
     
-    const fileSizeMB = selectedFile.size / 1024 / 1024;
+    console.log('🚀 Starting upload for:', file.name);
+    console.log('   Size:', (file.size / 1024 / 1024).toFixed(2), 'MB');
     
-    console.log(`File size: ${fileSizeMB.toFixed(2)} MB`);
+    const fileSizeMB = file.size / 1024 / 1024;
     
-    // Use chunked upload for files > 5 MB
     if (fileSizeMB > 5) {
       console.log(`📦 Large file detected - using chunked upload`);
-      await handleLargeFileUpload(selectedFile, selectedService);
+      await handleLargeFileUpload(file, selectedService);
     } else {
       console.log(`📄 Small file - using direct upload`);
-      await handleSmallFileUpload(selectedFile, selectedService);
+      await handleSmallFileUpload(file, selectedService);
     }
   };
 
   return (
-    <div style={styles.container}>
+    <div style={{
+      maxWidth: '600px',
+      margin: '40px auto',
+      padding: '30px',
+      background: '#ffffff',
+      borderRadius: '12px',
+      boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
+    }}>
       <h2>📤 Upload Phone Numbers</h2>
       
-      {/* Service Selection */}
-      <div style={styles.section}>
-        <label style={styles.label}>
+      <div style={{ marginBottom: '20px' }}>
+        <label style={{ display: 'block', marginBottom: '8px', fontWeight: '500' }}>
           Select Service:
           <select 
             value={selectedService} 
             onChange={handleServiceChange}
-            style={styles.select}
+            style={{
+              width: '100%',
+              padding: '10px',
+              marginTop: '5px',
+              borderRadius: '8px',
+              border: '2px solid #e5e7eb',
+              fontSize: '16px'
+            }}
             disabled={uploadStatus === 'uploading'}
           >
             <option value="blooio">Blooio</option>
-            <option value="other">Other Service</option>
           </select>
         </label>
       </div>
       
-      {/* File Selection */}
-      <div style={styles.section}>
-        <label style={styles.label}>
+      <div style={{ marginBottom: '20px' }}>
+        <label style={{ display: 'block', marginBottom: '8px', fontWeight: '500' }}>
           Choose CSV File:
           <input 
+            ref={fileInputRef}
             type="file" 
             accept=".csv" 
             onChange={handleFileChange}
-            style={styles.fileInput}
+            style={{ width: '100%', padding: '10px', marginTop: '5px' }}
             disabled={uploadStatus === 'uploading'}
           />
         </label>
       </div>
       
-      {/* File Info */}
       {selectedFile && (
-        <div style={styles.fileInfo}>
+        <div style={{
+          padding: '15px',
+          background: '#f3f4f6',
+          borderRadius: '8px',
+          marginBottom: '20px',
+          fontSize: '14px'
+        }}>
           <div>📄 {selectedFile.name}</div>
-          <div>📊 {(selectedFile.size / 1024 / 1024).toFixed(2)} MB</div>
+          <div>📊 {(selectedFile.size / 1024 / 1024).toFixed(2)} MB ({selectedFile.size.toLocaleString()} bytes)</div>
         </div>
       )}
       
-      {/* Upload Button */}
       <button 
         onClick={handleUpload}
         disabled={!selectedFile || uploadStatus === 'uploading'}
         style={{
-          ...styles.button,
-          opacity: (!selectedFile || uploadStatus === 'uploading') ? 0.5 : 1
+          width: '100%',
+          padding: '15px',
+          background: (!selectedFile || uploadStatus === 'uploading') 
+            ? '#9ca3af' 
+            : 'linear-gradient(90deg, #667eea 0%, #764ba2 100%)',
+          color: 'white',
+          border: 'none',
+          borderRadius: '8px',
+          fontSize: '18px',
+          fontWeight: '600',
+          cursor: (!selectedFile || uploadStatus === 'uploading') ? 'not-allowed' : 'pointer'
         }}
       >
         {uploadStatus === 'uploading' ? '⏳ Uploading...' : '🚀 Upload & Process'}
       </button>
       
-      {/* Progress Bar */}
       {uploadStatus !== 'idle' && (
-        <div style={styles.progressSection}>
-          <div style={styles.progressBar}>
+        <div style={{ marginTop: '20px' }}>
+          <div style={{
+            width: '100%',
+            height: '30px',
+            background: '#e5e7eb',
+            borderRadius: '15px',
+            overflow: 'hidden',
+            marginBottom: '10px'
+          }}>
             <div 
               style={{
-                ...styles.progressFill,
+                height: '100%',
                 width: `${uploadProgress}%`,
                 background: uploadStatus === 'error' 
                   ? 'linear-gradient(90deg, #f87171 0%, #dc2626 100%)'
                   : uploadStatus === 'complete'
                   ? 'linear-gradient(90deg, #34d399 0%, #10b981 100%)'
-                  : 'linear-gradient(90deg, #667eea 0%, #764ba2 100%)'
+                  : 'linear-gradient(90deg, #667eea 0%, #764ba2 100%)',
+                transition: 'width 0.3s ease'
               }}
             />
           </div>
-          <div style={styles.progressText}>
+          <div style={{ textAlign: 'center', fontSize: '18px', fontWeight: '600' }}>
             {uploadProgress.toFixed(1)}%
           </div>
         </div>
       )}
       
-      {/* Status Message */}
       {uploadMessage && (
         <div style={{
-          ...styles.message,
+          marginTop: '15px',
+          padding: '12px',
+          background: '#f3f4f6',
+          borderRadius: '8px',
+          fontSize: '14px',
+          fontWeight: '500',
+          textAlign: 'center',
           color: uploadStatus === 'error' ? '#dc2626' : 
                  uploadStatus === 'complete' ? '#10b981' : '#667eea'
         }}>
@@ -301,91 +352,3 @@ export default function FileUploader() {
     </div>
   );
 }
-
-const styles = {
-  container: {
-    maxWidth: '600px',
-    margin: '40px auto',
-    padding: '30px',
-    background: '#ffffff',
-    borderRadius: '12px',
-    boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
-  },
-  section: {
-    marginBottom: '20px'
-  },
-  label: {
-    display: 'block',
-    marginBottom: '8px',
-    fontWeight: '500',
-    color: '#374151'
-  },
-  select: {
-    width: '100%',
-    padding: '10px',
-    marginTop: '5px',
-    borderRadius: '8px',
-    border: '2px solid #e5e7eb',
-    fontSize: '16px'
-  },
-  fileInput: {
-    width: '100%',
-    padding: '10px',
-    marginTop: '5px'
-  },
-  fileInfo: {
-    padding: '15px',
-    background: '#f3f4f6',
-    borderRadius: '8px',
-    marginBottom: '20px',
-    fontSize: '14px',
-    color: '#6b7280'
-  },
-  button: {
-    width: '100%',
-    padding: '15px',
-    background: 'linear-gradient(90deg, #667eea 0%, #764ba2 100%)',
-    color: 'white',
-    border: 'none',
-    borderRadius: '8px',
-    fontSize: '18px',
-    fontWeight: '600',
-    cursor: 'pointer',
-    transition: 'opacity 0.2s'
-  },
-  progressSection: {
-    marginTop: '20px'
-  },
-  progressBar: {
-    width: '100%',
-    height: '30px',
-    background: '#e5e7eb',
-    borderRadius: '15px',
-    overflow: 'hidden',
-    marginBottom: '10px'
-  },
-  progressFill: {
-    height: '100%',
-    transition: 'width 0.3s ease',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    color: 'white',
-    fontWeight: '600'
-  },
-  progressText: {
-    textAlign: 'center',
-    fontSize: '18px',
-    fontWeight: '600',
-    color: '#374151'
-  },
-  message: {
-    marginTop: '15px',
-    padding: '12px',
-    background: '#f3f4f6',
-    borderRadius: '8px',
-    fontSize: '14px',
-    fontWeight: '500',
-    textAlign: 'center'
-  }
-};
