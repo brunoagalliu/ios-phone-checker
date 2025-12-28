@@ -11,7 +11,6 @@ export default function ActiveFiles() {
   const mountedRef = useRef(true);
 
   const fetchActiveFiles = useCallback(async () => {
-    // Prevent duplicate requests
     if (fetchingRef.current) {
       return;
     }
@@ -27,25 +26,20 @@ export default function ActiveFiles() {
       
       const data = await response.json();
       
-      // Only update state if component is still mounted
       if (!mountedRef.current) return;
       
-      if (data.success) {
-        // Safety check: ensure we have an array
-        const files = data.activeFiles || data.files || [];
-        setActiveFiles(Array.isArray(files) ? files : []);
+      if (data && data.success) {
+        const files = Array.isArray(data.activeFiles) ? data.activeFiles : [];
+        setActiveFiles(files);
         setError(null);
-        
-        if (data.warning) {
-          console.warn('Active files warning:', data.warning);
-        }
       } else {
-        throw new Error(data.error || 'Failed to fetch active files');
+        throw new Error(data?.error || 'Failed to fetch active files');
       }
     } catch (error) {
       console.error('Failed to fetch active files:', error);
       if (mountedRef.current) {
         setError(error.message);
+        setActiveFiles([]);
       }
     } finally {
       if (mountedRef.current) {
@@ -112,12 +106,10 @@ export default function ActiveFiles() {
     }
   };
 
-  // Safety check - don't render if activeFiles is invalid
   if (!Array.isArray(activeFiles)) {
     return null;
   }
 
-  // Show loading state
   if (loading && activeFiles.length === 0) {
     return (
       <div style={styles.container}>
@@ -130,7 +122,6 @@ export default function ActiveFiles() {
     );
   }
 
-  // Show error state with retry
   if (error && activeFiles.length === 0) {
     return (
       <div style={styles.container}>
@@ -151,7 +142,6 @@ export default function ActiveFiles() {
     );
   }
 
-  // Don't show if no active files
   if (activeFiles.length === 0) {
     return null;
   }
@@ -168,7 +158,6 @@ export default function ActiveFiles() {
       </div>
       
       {activeFiles.map(file => {
-        // Safety check for each file
         if (!file || !file.id) return null;
         
         const progress = parseFloat(file.processing_progress) || 0;
@@ -193,7 +182,8 @@ export default function ActiveFiles() {
             <div style={styles.progressBar}>
               <div 
                 style={{
-                  ...styles.progressFill,
+                  height: '100%',
+                  transition: 'width 0.3s ease',
                   width: `${Math.min(100, Math.max(0, progress))}%`,
                   background: isProcessing 
                     ? 'linear-gradient(90deg, #667eea 0%, #764ba2 100%)'
@@ -344,10 +334,6 @@ const styles = {
     borderRadius: '10px',
     overflow: 'hidden',
     marginBottom: '10px'
-  },
-  progressFill: {
-    height: '100%',
-    transition: 'width 0.3s ease'
   },
   progressText: {
     fontSize: '14px',
