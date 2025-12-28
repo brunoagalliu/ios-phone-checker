@@ -1,105 +1,162 @@
 import { NextResponse } from 'next/server';
 import { getConnection } from '../../../lib/db.js';
-import { processChunk } from '../check-batch-blooio-chunked/route.js'; // ✅ Direct import
 
 export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
 
+// Main processing function
 async function processQueue() {
-  const connection = await getConnection();
+  console.log('🔄 Queue worker checking for files to process...');
   
   try {
-    console.log('🔄 Queue worker checking for files to process...');
+    const connection = await getConnection();
     
+    // Find files that need processing
     const [files] = await connection.execute(
-      `SELECT * FROM uploaded_files
-       WHERE processing_status IN ('initialized', 'processing', 'uploaded')
-         AND processing_offset < processing_total
-         AND processing_state IS NOT NULL
-         AND (can_resume = 1 OR can_resume IS NULL)
-       ORDER BY 
-         CASE 
-           WHEN processing_status = 'processing' THEN 1
-           WHEN processing_status = 'initialized' THEN 2
-           ELSE 3
-         END,
-         upload_date ASC
+      `SELECT * FROM uploaded_files 
+       WHERE processing_status IN ('initialized', 'processing')
+       AND processing_offset < processing_total
+       ORDER BY upload_date ASC
        LIMIT 1`
     );
     
+    console.log(`📋 Found ${files.length} file(s) to process`);
+    
     if (files.length === 0) {
       console.log('✅ No files need processing');
-      return {
-        success: true, 
-        message: 'Queue empty - all files processed'
-      };
+      return NextResponse.json({
+        success: true,
+        message: 'No files to process',
+        filesProcessed: 0
+      });
     }
     
     const file = files[0];
-    console.log(`🚀 Processing file ${file.id}: ${file.file_name}`);
-    console.log(`   Progress: ${file.processing_offset}/${file.processing_total}`);
     
-    // ✅ Direct function call instead of fetch
-    const result = await processChunk(file.id, file.processing_offset);
+    console.log(`\n=== PROCESSING FILE ${file.id} ===`);
+    console.log(`File: ${file.file_name}`);
+    console.log(`Service: ${file.service}`);
+    console.log(`Progress: ${file.processing_offset}/${file.processing_total} (${file.processing_progress}%)`);
     
-    if (result.success) {
-  // Handle skipped chunks
-  if (result.skipped) {
-    console.log(`⏭️ Chunk was skipped (already processed by auto-trigger)`);
-    return {
+    // Get next pending chunk
+    const [chunks] = await connection.execute(
+      `SELECT * FROM processing_chunks
+       WHERE file_id = ?
+       AND chunk_status = 'pending'
+       ORDER BY chunk_offset ASC
+       LIMIT 1`,
+      [file.id]
+    );
+    
+    if (chunks.length === 0) {
+      console.log('⚠️ No pending chunks found');
+      
+      // Check if file is complete
+      if (file.processing_offset >= file.processing_total) {
+        console.log('✅ File processing complete!');
+        
+        await connection.execute(
+          `UPDATE uploaded_files 
+           SET processing_status = 'completed'
+           WHERE id = ?`,
+          [file.id]
+        );
+        
+        return NextResponse.json({
+          success: true,
+          message: `File ${file.id} completed`,
+          fileId: file.id
+        });
+      }
+      
+      return NextResponse.json({
+        success: true,
+        message: 'No chunks to process',
+        filesProcessed: 0
+      });
+    }
+    
+    const chunk = chunks[0];
+    
+    console.log(`📦 Processing chunk at offset ${chunk.chunk_offset}`);
+    
+    // Mark chunk as processing
+    await connection.execute(
+      `UPDATE processing_chunks 
+       SET chunk_status = 'processing'
+       WHERE id = ?`,
+      [chunk.id]
+    );
+    
+    // Update file status to processing
+    if (file.processing_status !== 'processing') {
+      await connection.execute(
+        `UPDATE uploaded_files 
+         SET processing_status = 'processing'
+         WHERE id = ?`,
+        [file.id]
+      );
+    }
+    
+    // Trigger chunk processing based on service
+    const baseUrl = process.env.VERCEL_URL 
+      ? `https://${process.env.VERCEL_URL}` 
+      : 'http://localhost:3000';
+    
+    let processingEndpoint;
+    
+    if (file.service === 'blooio') {
+      processingEndpoint = `${baseUrl}/api/check-batch-blooio-chunked`;
+    } else {
+      processingEndpoint = `${baseUrl}/api/check-batch-generic-chunked`;
+    }
+    
+    console.log(`🚀 Triggering: ${processingEndpoint}`);
+    
+    const response = await fetch(processingEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fileId: file.id,
+        chunkId: chunk.id
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Processing failed: ${response.status} ${response.statusText}`);
+    }
+    
+    const result = await response.json();
+    
+    console.log(`✓ Chunk processing triggered`);
+    
+    return NextResponse.json({
       success: true,
-      message: 'Chunk already processed',
+      message: `Started processing file ${file.id}`,
       fileId: file.id,
-      skipped: true
-    };
-  }
-  
-  console.log(`✅ Chunk processed: ${result.processed}/${result.total} (${result.progress}%)`);
-  
-  if (result.isComplete) {
-    console.log(`🎉 File ${file.id} completed!`);
-  }
-  
-  return {
-    success: true,
-    message: result.isComplete ? 'File completed' : 'Chunk completed',
-    fileId: file.id,
-    progress: result.progress,
-    processed: result.processed,
-    total: result.total
-  };
-}
+      chunkId: chunk.id,
+      filesProcessed: 1
+    });
     
   } catch (error) {
-    console.error('❌ Queue worker error:', error);
-    throw error;
+    console.error('❌ Queue processing error:', error);
+    
+    return NextResponse.json({
+      success: false,
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    }, { status: 500 });
   }
 }
 
+// Handle GET requests (from cron)
 export async function GET(request) {
   console.log('=== CRON JOB TRIGGERED (GET) ===');
-  
-  try {
-    const result = await processQueue();
-    return NextResponse.json(result);
-  } catch (error) {
-    return NextResponse.json({
-      success: false,
-      error: error.message
-    }, { status: 500 });
-  }
+  return processQueue();
 }
 
+// Handle POST requests (from manual triggers)
 export async function POST(request) {
   console.log('=== MANUAL TRIGGER (POST) ===');
-  
-  try {
-    const result = await processQueue();
-    return NextResponse.json(result);
-  } catch (error) {
-    return NextResponse.json({
-      success: false,
-      error: error.message
-    }, { status: 500 });
-  }
+  return processQueue();
 }
