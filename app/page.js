@@ -6,7 +6,7 @@ import ProcessingQueue from './components/ProcessingQueue';
 import FileHistory from './components/FileHistory';
 import Instructions from './components/Instructions';
 import FileProgressChecker from './components/FileProgressChecker';
-import ActiveFiles from './components/ActiveFiles';
+// import ActiveFiles from './components/ActiveFiles';
 
 export default function Home() {
   const [processingFiles, setProcessingFiles] = useState([]);
@@ -266,8 +266,8 @@ export default function Home() {
           </div>
         )}
 
-        {/* Active Files - shows currently processing files */}
-        <ActiveFiles />
+        {/* Active Files - shows currently processing files
+        <ActiveFiles /> */}
 
         {/* Normal file upload interface */}
         <div style={styles.uploadSection}>
