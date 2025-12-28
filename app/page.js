@@ -1,6 +1,6 @@
 'use client';
 
-import FileUploaderSimple from '@/components/FileUploaderSimple';
+import FileUploaderSimple from './components/FileUploaderSimple';
 
 export default function Home() {
   return (
