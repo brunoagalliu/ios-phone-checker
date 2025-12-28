@@ -110,12 +110,18 @@ export async function POST(request) {
       
       console.log(`📄 Header: ${header}`);
       console.log(`📄 Data lines: ${dataLines.length}`);
+
+      console.log(`📄 First 5 data lines:`);
+for (let i = 0; i < Math.min(5, dataLines.length); i++) {
+  console.log(`   Line ${i + 1}: "${dataLines[i]}"`);
+}
       
       // Parse phone numbers
       const { parsePhoneNumber, isValidPhoneNumber } = await import('libphonenumber-js');
       
       const validPhones = [];
       const invalidPhones = [];
+      let sampleErrorsShown = 0;
       
       for (let i = 0; i < dataLines.length; i++) {
         const line = dataLines[i].trim();
@@ -125,21 +131,34 @@ export async function POST(request) {
         const phoneNumber = parts[0].trim();
         
         try {
-          if (phoneNumber && isValidPhoneNumber(phoneNumber)) {
+          if (!phoneNumber) {
+            if (sampleErrorsShown < 5) {
+              console.log(`❌ Line ${i + 1}: Empty phone number`);
+              sampleErrorsShown++;
+            }
+            invalidPhones.push({ line: i + 1, phone: phoneNumber, reason: 'Empty' });
+            continue;
+          }
+          
+          if (isValidPhoneNumber(phoneNumber)) {
             const parsed = parsePhoneNumber(phoneNumber);
             validPhones.push({
               original: phoneNumber,
               e164: parsed.format('E.164')
             });
           } else {
-            if (invalidPhones.length < 100) {
-              invalidPhones.push(phoneNumber);
+            if (sampleErrorsShown < 5) {
+              console.log(`❌ Line ${i + 1}: Invalid format - "${phoneNumber}"`);
+              sampleErrorsShown++;
             }
+            invalidPhones.push({ line: i + 1, phone: phoneNumber, reason: 'Invalid format' });
           }
         } catch (error) {
-          if (invalidPhones.length < 100) {
-            invalidPhones.push(phoneNumber);
+          if (sampleErrorsShown < 5) {
+            console.log(`❌ Line ${i + 1}: Parse error - "${phoneNumber}" - ${error.message}`);
+            sampleErrorsShown++;
           }
+          invalidPhones.push({ line: i + 1, phone: phoneNumber, reason: error.message });
         }
       }
       
