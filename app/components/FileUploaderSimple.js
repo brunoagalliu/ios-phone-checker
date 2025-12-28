@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 
 export default function FileUploaderSimple() {
   const [selectedFile, setSelectedFile] = useState(null);
@@ -8,10 +8,13 @@ export default function FileUploaderSimple() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadStatus, setUploadStatus] = useState('idle');
   const [uploadMessage, setUploadMessage] = useState('');
+  
+  const fileInputRef = useRef(null); // ✅ Add ref to file input
 
   const handleFileChange = (e) => {
     const file = e.target.files[0];
     if (file) {
+      console.log('📁 File selected:', file.name, 'Size:', file.size, 'bytes');
       setSelectedFile(file);
       setUploadStatus('idle');
       setUploadProgress(0);
@@ -147,20 +150,41 @@ export default function FileUploaderSimple() {
     setUploadMessage('Uploading file...');
     
     try {
+      console.log('📤 Small file upload starting...');
+      console.log('  File:', file.name);
+      console.log('  Size:', file.size, 'bytes');
+      console.log('  Type:', file.type);
+      
+      if (!file || file.size === 0) {
+        throw new Error('File is empty or not properly selected');
+      }
+      
       const formData = new FormData();
       formData.append('file', file);
       formData.append('service', service);
+      
+      console.log('📦 Sending request to /api/init-large-file...');
       
       const response = await fetch('/api/init-large-file', {
         method: 'POST',
         body: formData
       });
       
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      console.log('📬 Response status:', response.status);
+      
+      const responseText = await response.text();
+      console.log('📄 Response text:', responseText);
+      
+      let data;
+      try {
+        data = JSON.parse(responseText);
+      } catch (e) {
+        throw new Error(`Server returned invalid JSON: ${responseText.substring(0, 200)}`);
       }
       
-      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || `HTTP ${response.status}: ${response.statusText}`);
+      }
       
       if (data.success) {
         setUploadStatus('complete');
@@ -172,7 +196,7 @@ export default function FileUploaderSimple() {
       }
       
     } catch (error) {
-      console.error('Upload error:', error);
+      console.error('❌ Upload error:', error);
       setUploadStatus('error');
       setUploadMessage(`❌ Error: ${error.message}`);
       alert(`❌ Upload failed: ${error.message}`);
@@ -180,21 +204,25 @@ export default function FileUploaderSimple() {
   };
 
   const handleUpload = async () => {
-    if (!selectedFile) {
+    // ✅ Get fresh file reference from input
+    const file = fileInputRef.current?.files[0];
+    
+    if (!file) {
       alert('Please select a file first');
       return;
     }
     
-    const fileSizeMB = selectedFile.size / 1024 / 1024;
+    console.log('🚀 Starting upload for:', file.name);
+    console.log('   Size:', (file.size / 1024 / 1024).toFixed(2), 'MB');
     
-    console.log(`File size: ${fileSizeMB.toFixed(2)} MB`);
+    const fileSizeMB = file.size / 1024 / 1024;
     
     if (fileSizeMB > 5) {
       console.log(`📦 Large file detected - using chunked upload`);
-      await handleLargeFileUpload(selectedFile, selectedService);
+      await handleLargeFileUpload(file, selectedService);
     } else {
       console.log(`📄 Small file - using direct upload`);
-      await handleSmallFileUpload(selectedFile, selectedService);
+      await handleSmallFileUpload(file, selectedService);
     }
   };
 
@@ -234,6 +262,7 @@ export default function FileUploaderSimple() {
         <label style={{ display: 'block', marginBottom: '8px', fontWeight: '500' }}>
           Choose CSV File:
           <input 
+            ref={fileInputRef}
             type="file" 
             accept=".csv" 
             onChange={handleFileChange}
@@ -252,7 +281,7 @@ export default function FileUploaderSimple() {
           fontSize: '14px'
         }}>
           <div>📄 {selectedFile.name}</div>
-          <div>📊 {(selectedFile.size / 1024 / 1024).toFixed(2)} MB</div>
+          <div>📊 {(selectedFile.size / 1024 / 1024).toFixed(2)} MB ({selectedFile.size.toLocaleString()} bytes)</div>
         </div>
       )}
       
