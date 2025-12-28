@@ -112,7 +112,7 @@ export async function POST(request) {
       if (!line) continue;
       
       const parts = line.split(',');
-      const phoneNumber = parts[0].trim();
+      let phoneNumber = parts[0].trim();
       
       try {
         if (!phoneNumber) {
@@ -120,17 +120,33 @@ export async function POST(request) {
           continue;
         }
         
-        if (isValidPhoneNumber(phoneNumber)) {
-          const parsed = parsePhoneNumber(phoneNumber);
+        // ✅ Clean the phone number - remove non-digits except +
+        let cleanedPhone = phoneNumber.replace(/[^\d+]/g, '');
+        
+        // ✅ Add country code if missing
+        if (cleanedPhone.length === 10 && !cleanedPhone.startsWith('+')) {
+          cleanedPhone = '+1' + cleanedPhone;
+        } else if (cleanedPhone.length === 11 && cleanedPhone.startsWith('1') && !cleanedPhone.startsWith('+')) {
+          cleanedPhone = '+' + cleanedPhone;
+        } else if (!cleanedPhone.startsWith('+')) {
+          cleanedPhone = '+' + cleanedPhone;
+        }
+        
+        console.log(`Processing: "${phoneNumber}" → "${cleanedPhone}"`);
+        
+        if (isValidPhoneNumber(cleanedPhone)) {
+          const parsed = parsePhoneNumber(cleanedPhone);
           const e164 = parsed.format('E.164');
           validPhones.push({
             original: phoneNumber,
             e164: e164
           });
         } else {
+          console.warn(`Invalid after cleaning: "${phoneNumber}" → "${cleanedPhone}"`);
           invalidPhones.push({ line: i + 2, phone: phoneNumber, reason: 'Invalid format' });
         }
       } catch (error) {
+        console.error(`Parse error for "${phoneNumber}":`, error.message);
         invalidPhones.push({ line: i + 2, phone: phoneNumber, reason: error.message });
       }
     }
