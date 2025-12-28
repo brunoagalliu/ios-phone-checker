@@ -1,7 +1,11 @@
 import { NextResponse } from 'next/server';
+import { parsePhoneNumber, isValidPhoneNumber } from 'libphonenumber-js';
 import { getConnection } from '../../../lib/db.js';
 import { checkBlooioSingle, blooioRateLimiter } from '../../../lib/blooioClient.js';
-import { getBatchFromAppCache, saveBatchToAppCache, getAppCacheStats } from '../../../lib/appCache.js';
+import { 
+  getFromAppCache, 
+  saveToAppCache  // ✅ Only these two
+} from '../../../lib/appCache.js';
 
 export const maxDuration = 300;
 
