@@ -266,6 +266,8 @@ export default function Home() {
           </div>
         )}
 
+        {/* Active Files - shows currently processing files */}
+        <ActiveFiles />
 
         {/* Normal file upload interface */}
         <div style={styles.uploadSection}>
