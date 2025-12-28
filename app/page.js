@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import FileUploader from './components/FileUploader';
+// import FileUploader from './components/FileUploader';
 import ProcessingQueue from './components/ProcessingQueue';
 import FileHistory from './components/FileHistory';
 import Instructions from './components/Instructions';
@@ -270,13 +270,13 @@ export default function Home() {
         <ActiveFiles /> */}
 
         {/* Normal file upload interface */}
-        <div style={styles.uploadSection}>
+        {/* <div style={styles.uploadSection}>
           <FileUploader
             onFilesSelected={handleFilesSelected}
             disabled={processingFiles.some(f => f.status === 'processing')}
           />
           <Instructions />
-        </div>
+        </div> */}
 
         {/* Processing queue for small files */}
         {processingFiles.length > 0 && (
