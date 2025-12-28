@@ -2,64 +2,86 @@ import { NextResponse } from 'next/server';
 import { getConnection } from '../../../lib/db.js';
 
 export const maxDuration = 10;
+export const dynamic = 'force-dynamic';
 
-export async function GET() {
-  let connection;
-  
+// Cache response for 3 seconds
+let cachedResponse = null;
+let cacheTime = 0;
+const CACHE_TTL = 3000;
+
+export async function GET(request) {
   try {
-    console.log('Fetching active files...');
+    const now = Date.now();
     
-    // Get connection with timeout
-    connection = await Promise.race([
-      getConnection(),
-      new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Database connection timeout')), 5000)
-      )
-    ]);
+    // Return cached response if fresh
+    if (cachedResponse && (now - cacheTime) < CACHE_TTL) {
+      return NextResponse.json({
+        ...cachedResponse,
+        cached: true
+      });
+    }
     
-    console.log('Database connected, querying active files...');
+    const connection = await getConnection();
     
-    // Query with timeout
-    const [files] = await Promise.race([
-      connection.execute(
-        `SELECT 
-          id,
-          file_name,
-          original_name,
-          processing_status,
-          processing_offset,
-          processing_total,
-          processing_progress,
-          can_resume,
-          upload_date
-         FROM uploaded_files
-         WHERE processing_status IN ('initialized', 'processing')
-           AND processing_state IS NOT NULL
-         ORDER BY upload_date DESC
-         LIMIT 10`
-      ),
-      new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Query timeout')), 5000)
-      )
-    ]);
+    // Get ALL files that aren't completed or failed
+    const [files] = await connection.execute(
+      `SELECT 
+        id, 
+        file_name, 
+        processing_status, 
+        upload_status,
+        processing_progress,
+        processing_offset,
+        processing_total,
+        upload_date,
+        service,
+        last_error,
+        CASE 
+          WHEN processing_status IN ('initialized', 'paused') THEN 1
+          ELSE 0
+        END as can_resume
+       FROM uploaded_files
+       WHERE processing_status NOT IN ('completed', 'failed')
+         OR (processing_status IS NULL AND upload_status = 'completed')
+       ORDER BY upload_date DESC
+       LIMIT 10`
+    );
     
-    console.log(`Found ${files.length} active files`);
+    console.log(`[active-files] Query returned ${files.length} files`);
     
-    return NextResponse.json({
+    // Debug: Show what we found
+    if (files.length > 0) {
+      files.forEach(f => {
+        console.log(`  - File ${f.id}: status="${f.processing_status}", upload="${f.upload_status}", total=${f.processing_total}`);
+      });
+    } else {
+      console.log(`  No active files found`);
+      
+      // Debug: Check if file 7 exists at all
+      const [allFiles] = await connection.execute(
+        `SELECT id, processing_status, upload_status FROM uploaded_files ORDER BY id DESC LIMIT 5`
+      );
+      console.log(`  Recent files in database:`, allFiles);
+    }
+    
+    const response = {
       success: true,
-      files: files || []
-    });
+      activeFiles: files,
+      count: files.length,
+      timestamp: new Date().toISOString()
+    };
+    
+    // Update cache
+    cachedResponse = response;
+    cacheTime = now;
+    
+    return NextResponse.json(response);
     
   } catch (error) {
     console.error('Active files error:', error);
-    console.error('Error stack:', error.stack);
-    
-    // Return empty array on error so UI doesn't break
     return NextResponse.json({
-      success: true, // Still return success to prevent UI errors
-      files: [],
-      warning: error.message
-    }, { status: 200 }); // Return 200 instead of 500
-    
+      success: false,
+      error: error.message
+    }, { status: 500 });
   }
 }
