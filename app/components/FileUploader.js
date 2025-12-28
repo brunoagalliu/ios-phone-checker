@@ -25,27 +25,49 @@ export default function FileUploader() {
 
   // Chunked upload for large files (> 5 MB)
   const handleLargeFileUpload = async (file, service) => {
-    const CHUNK_SIZE = 1 * 1024 * 1024; // 1 MB chunks
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    const LINES_PER_CHUNK = 50000; // 50k lines per chunk instead of 1MB
     
     console.log(`📂 Uploading ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`);
-    console.log(`📦 Total chunks: ${totalChunks}`);
     
     setUploadProgress(0);
     setUploadStatus('uploading');
-    setUploadMessage(`Uploading in ${totalChunks} chunks...`);
+    setUploadMessage(`Reading file...`);
     
     let uploadId = null;
     
     try {
-      // Read file as text
+      // Read entire file as text
       const fileText = await file.text();
+      const allLines = fileText.trim().split('\n');
+      
+      if (allLines.length < 2) {
+        throw new Error('File must contain at least a header and one data row');
+      }
+      
+      const header = allLines[0];
+      const dataLines = allLines.slice(1);
+      
+      // Calculate chunks based on lines
+      const totalChunks = Math.ceil(dataLines.length / LINES_PER_CHUNK);
+      
+      console.log(`📦 Total lines: ${dataLines.length.toLocaleString()}`);
+      console.log(`📦 Total chunks: ${totalChunks}`);
+      
+      setUploadMessage(`Uploading ${totalChunks} chunks...`);
       
       // Upload chunks
       for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-        const start = chunkIndex * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, fileText.length);
-        const chunkData = fileText.slice(start, end);
+        const start = chunkIndex * LINES_PER_CHUNK;
+        const end = Math.min(start + LINES_PER_CHUNK, dataLines.length);
+        const chunkLines = dataLines.slice(start, end);
+        
+        // Include header in first chunk only
+        let chunkData;
+        if (chunkIndex === 0) {
+          chunkData = header + '\n' + chunkLines.join('\n');
+        } else {
+          chunkData = chunkLines.join('\n');
+        }
         
         const formData = new FormData();
         formData.append('fileName', file.name);
@@ -53,12 +75,13 @@ export default function FileUploader() {
         formData.append('chunkIndex', chunkIndex);
         formData.append('totalChunks', totalChunks);
         formData.append('chunk', chunkData);
+        formData.append('hasHeader', chunkIndex === 0 ? 'true' : 'false');
         
         if (uploadId) {
           formData.append('uploadId', uploadId);
         }
         
-        console.log(`📤 Uploading chunk ${chunkIndex + 1}/${totalChunks}...`);
+        console.log(`📤 Uploading chunk ${chunkIndex + 1}/${totalChunks} (${chunkLines.length.toLocaleString()} lines)...`);
         
         const response = await fetch('/api/upload-chunk', {
           method: 'POST',
@@ -90,7 +113,7 @@ export default function FileUploader() {
         // Check if complete
         if (data.complete) {
           console.log(`✅ Upload complete! File ID: ${uploadId}`);
-          console.log(`📊 Total records: ${data.totalRecords}`);
+          console.log(`📊 Total records: ${data.totalRecords.toLocaleString()}`);
           
           setUploadStatus('processing');
           setUploadMessage('Upload complete! Initializing processing...');

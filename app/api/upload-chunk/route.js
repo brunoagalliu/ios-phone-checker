@@ -10,11 +10,14 @@ export async function POST(request) {
     const uploadId = formData.get('uploadId');
     const chunkIndex = parseInt(formData.get('chunkIndex'));
     const totalChunks = parseInt(formData.get('totalChunks'));
-    const chunkData = formData.get('chunk'); // CSV text chunk
+    const chunkData = formData.get('chunk');
     const fileName = formData.get('fileName');
     const service = formData.get('service');
+    const hasHeader = formData.get('hasHeader') === 'true';
     
-    console.log(`📦 Received chunk ${chunkIndex + 1}/${totalChunks} for upload ${uploadId}`);
+    console.log(`📦 Received chunk ${chunkIndex + 1}/${totalChunks} for upload ${uploadId || 'new'}`);
+    console.log(`   Has header: ${hasHeader}`);
+    console.log(`   Chunk size: ${chunkData.length} chars`);
     
     const connection = await getConnection();
     
@@ -29,6 +32,8 @@ export async function POST(request) {
       
       const fileId = result.insertId;
       
+      console.log(`✓ Created file record ${fileId}`);
+      
       // Store chunk
       await connection.execute(
         `INSERT INTO file_chunks (file_id, chunk_index, chunk_data)
@@ -40,6 +45,8 @@ export async function POST(request) {
         `UPDATE uploaded_files SET chunks_received = 1 WHERE id = ?`,
         [fileId]
       );
+      
+      console.log(`✓ Stored chunk 1/${totalChunks}`);
       
       return NextResponse.json({
         success: true,
@@ -66,6 +73,8 @@ export async function POST(request) {
       [fileId]
     );
     
+    console.log(`✓ Stored chunk ${chunkIndex + 1}/${totalChunks}`);
+    
     // Check if all chunks received
     const [file] = await connection.execute(
       `SELECT chunks_received, chunk_count FROM uploaded_files WHERE id = ?`,
@@ -75,119 +84,160 @@ export async function POST(request) {
     const allReceived = file[0].chunks_received === file[0].chunk_count;
     
     if (allReceived) {
-        console.log(`✅ All chunks received for upload ${fileId}`);
+      console.log(`\n✅ All chunks received for upload ${fileId} - Processing...`);
+      
+      // Merge chunks
+      const [chunks] = await connection.execute(
+        `SELECT chunk_data FROM file_chunks 
+         WHERE file_id = ? 
+         ORDER BY chunk_index ASC`,
+        [fileId]
+      );
+      
+      // First chunk has header, rest don't
+      const firstChunk = chunks[0].chunk_data; // Has header
+      const restChunks = chunks.slice(1).map(c => c.chunk_data).join('\n');
+      
+      const fullContent = firstChunk + (restChunks ? '\n' + restChunks : '');
+      
+      console.log(`📄 Merged content length: ${fullContent.length} chars`);
+      
+      const lines = fullContent.trim().split('\n');
+      console.log(`📄 Total lines: ${lines.length}`);
+      
+      const header = lines[0];
+      const dataLines = lines.slice(1);
+      
+      console.log(`📄 Header: ${header}`);
+      console.log(`📄 Data lines: ${dataLines.length}`);
+      
+      // Parse phone numbers
+      const { parsePhoneNumber, isValidPhoneNumber } = await import('libphonenumber-js');
+      
+      const validPhones = [];
+      const invalidPhones = [];
+      
+      for (let i = 0; i < dataLines.length; i++) {
+        const line = dataLines[i].trim();
+        if (!line) continue;
         
-        // Merge chunks and process
-        const [chunks] = await connection.execute(
-          `SELECT chunk_data FROM file_chunks 
-           WHERE file_id = ? 
-           ORDER BY chunk_index ASC`,
-          [fileId]
-        );
+        const parts = line.split(',');
+        const phoneNumber = parts[0].trim();
         
-        const fullContent = chunks.map(c => c.chunk_data).join('');
-        const lines = fullContent.trim().split('\n');
-        const dataLines = lines.slice(1); // Skip header
-        
-        // Parse phone numbers
-        const { parsePhoneNumber, isValidPhoneNumber } = await import('libphonenumber-js');
-        
-        const validPhones = [];
-        
-        for (let i = 0; i < dataLines.length; i++) {
-          const line = dataLines[i].trim();
-          if (!line) continue;
-          
-          const parts = line.split(',');
-          const phoneNumber = parts[0].trim();
-          
-          try {
-            if (phoneNumber && isValidPhoneNumber(phoneNumber)) {
-              const parsed = parsePhoneNumber(phoneNumber);
-              validPhones.push({
-                original: phoneNumber,
-                e164: parsed.format('E.164')
-              });
+        try {
+          if (phoneNumber && isValidPhoneNumber(phoneNumber)) {
+            const parsed = parsePhoneNumber(phoneNumber);
+            validPhones.push({
+              original: phoneNumber,
+              e164: parsed.format('E.164')
+            });
+          } else {
+            if (invalidPhones.length < 100) {
+              invalidPhones.push(phoneNumber);
             }
-          } catch (error) {
-            // Skip invalid
+          }
+        } catch (error) {
+          if (invalidPhones.length < 100) {
+            invalidPhones.push(phoneNumber);
           }
         }
-        
-        console.log(`✓ Parsed ${validPhones.length} valid phones`);
-        
-        // Create processing chunks
-        const CHUNK_SIZE = service === 'blooio' ? 500 : 1000;
-        const processingChunks = [];
-        
-        for (let i = 0; i < validPhones.length; i += CHUNK_SIZE) {
-          const chunkPhones = validPhones.slice(i, i + CHUNK_SIZE);
-          processingChunks.push({
-            file_id: fileId,
-            chunk_offset: i,
-            chunk_data: JSON.stringify(chunkPhones),
-            chunk_status: 'pending'
-          });
-        }
-        
-        console.log(`✓ Creating ${processingChunks.length} processing chunks...`);
-        
-        // Insert processing chunks
-        if (processingChunks.length > 0) {
-          const values = processingChunks.map(chunk => 
-            `(${chunk.file_id}, ${chunk.chunk_offset}, ${connection.escape(chunk.chunk_data)}, '${chunk.chunk_status}')`
-          ).join(',');
-          
-          await connection.execute(
-            `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
-             VALUES ${values}`
-          );
-          
-          console.log(`✓ ${processingChunks.length} processing chunks created`);
-        }
-        
-        // Update file record
-        await connection.execute(
-          `UPDATE uploaded_files 
-           SET upload_status = 'completed',
-               processing_status = 'initialized',
-               processing_total = ?
-           WHERE id = ?`,
-          [validPhones.length, fileId]
-        );
-        
-        // Clean up upload chunks (NOW it's safe to delete)
-        await connection.execute(
-          `DELETE FROM file_chunks WHERE file_id = ?`,
-          [fileId]
-        );
-        
-        console.log(`✅ File ${fileId} ready for processing`);
-        
-        return NextResponse.json({
-          success: true,
-          uploadId: fileId,
-          chunkIndex: chunkIndex,
-          complete: true,
-          totalRecords: validPhones.length,
-          processingChunks: processingChunks.length,
-          message: 'Upload complete and processing chunks created'
+      }
+      
+      console.log(`✓ Valid phones: ${validPhones.length}`);
+      console.log(`✗ Invalid phones: ${invalidPhones.length}`);
+      
+      if (invalidPhones.length > 0 && invalidPhones.length < 10) {
+        console.log(`Invalid samples:`, invalidPhones);
+      }
+      
+      if (validPhones.length === 0) {
+        throw new Error('No valid phone numbers found in file');
+      }
+      
+      // Create processing chunks
+      const CHUNK_SIZE = service === 'blooio' ? 500 : 1000;
+      const processingChunks = [];
+      
+      for (let i = 0; i < validPhones.length; i += CHUNK_SIZE) {
+        const chunkPhones = validPhones.slice(i, i + CHUNK_SIZE);
+        processingChunks.push({
+          file_id: fileId,
+          chunk_offset: i,
+          chunk_data: JSON.stringify(chunkPhones),
+          chunk_status: 'pending'
         });
       }
+      
+      console.log(`✓ Creating ${processingChunks.length} processing chunks...`);
+      
+      // Insert processing chunks
+      if (processingChunks.length > 0) {
+        const values = processingChunks.map(chunk => 
+          `(${chunk.file_id}, ${chunk.chunk_offset}, ${connection.escape(chunk.chunk_data)}, '${chunk.chunk_status}')`
+        ).join(',');
+        
+        await connection.execute(
+          `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
+           VALUES ${values}`
+        );
+        
+        console.log(`✓ ${processingChunks.length} processing chunks created`);
+      }
+      
+      // Update file record
+      await connection.execute(
+        `UPDATE uploaded_files 
+         SET upload_status = 'completed',
+             processing_status = 'initialized',
+             processing_total = ?,
+             processing_offset = 0,
+             processing_progress = 0
+         WHERE id = ?`,
+        [validPhones.length, fileId]
+      );
+      
+      console.log(`✓ File record updated`);
+      
+      // Clean up upload chunks (NOW it's safe to delete)
+      await connection.execute(
+        `DELETE FROM file_chunks WHERE file_id = ?`,
+        [fileId]
+      );
+      
+      console.log(`✓ Upload chunks cleaned up`);
+      console.log(`✅ File ${fileId} ready for processing with ${validPhones.length} phones\n`);
+      
+      return NextResponse.json({
+        success: true,
+        uploadId: fileId,
+        chunkIndex: chunkIndex,
+        complete: true,
+        totalRecords: validPhones.length,
+        invalidRecords: invalidPhones.length,
+        processingChunks: processingChunks.length,
+        message: 'Upload complete and processing chunks created'
+      });
+    }
+    
+    // Not all chunks received yet
+    const progress = ((file[0].chunks_received / file[0].chunk_count) * 100).toFixed(1);
     
     return NextResponse.json({
       success: true,
       uploadId: fileId,
       chunkIndex: chunkIndex,
       complete: false,
-      progress: ((file[0].chunks_received / file[0].chunk_count) * 100).toFixed(1)
+      progress: progress,
+      chunksReceived: file[0].chunks_received,
+      totalChunks: file[0].chunk_count
     });
     
   } catch (error) {
     console.error('Chunk upload error:', error);
     return NextResponse.json({
       success: false,
-      error: error.message
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     }, { status: 500 });
   }
 }
