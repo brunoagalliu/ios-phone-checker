@@ -8,7 +8,7 @@ export async function POST(request) {
   try {
     const contentType = request.headers.get('content-type');
     
-    // Handle chunked upload (from FileUploader component)
+    // Handle chunked upload (JSON with fileId)
     if (contentType?.includes('application/json')) {
       const { fileId, service } = await request.json();
       
@@ -23,13 +23,19 @@ export async function POST(request) {
       );
       
       if (files.length === 0) {
-        throw new Error('File not found');
+        return NextResponse.json({
+          success: false,
+          error: 'File not found'
+        }, { status: 404 });
       }
       
       const file = files[0];
       
       if (file.upload_status !== 'completed') {
-        throw new Error('File upload not completed');
+        return NextResponse.json({
+          success: false,
+          error: 'File upload not completed yet'
+        }, { status: 400 });
       }
       
       console.log(`✓ File found: ${file.file_name}`);
@@ -38,18 +44,18 @@ export async function POST(request) {
       
       // Trigger processing queue
       try {
-            //const baseUrl = process.env.NEXT_PUBLIC_BASE_URL || 'https://ios.smsapp.co';
-
-    const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
-    const host = request.headers.get('host') || 'ios.smsapp.co';
-    const baseUrl = `${protocol}://${host}`;
+        const baseUrl = process.env.VERCEL_URL 
+          ? `https://${process.env.VERCEL_URL}` 
+          : 'http://localhost:3000';
         
-        await fetch(`${baseUrl}/api/process-queue`, {
+        const queueResponse = await fetch(`${baseUrl}/api/process-queue`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' }
         });
         
-        console.log('✓ Processing queue triggered');
+        const queueData = await queueResponse.json();
+        console.log('✓ Processing queue triggered:', queueData);
+        
       } catch (triggerError) {
         console.warn('⚠️ Could not trigger queue (will be picked up by cron):', triggerError.message);
       }
@@ -63,7 +69,7 @@ export async function POST(request) {
       });
     }
     
-    // Handle direct upload (small files via FormData)
+    // Handle direct upload (FormData with file)
     const formData = await request.formData();
     const file = formData.get('file');
     const service = formData.get('service') || 'blooio';
@@ -175,7 +181,7 @@ export async function POST(request) {
     // Batch insert chunks
     if (chunks.length > 0) {
       const values = chunks.map(chunk => 
-        `(${chunk.file_id}, ${chunk.chunk_offset}, '${chunk.chunk_data.replace(/'/g, "''")}', '${chunk.chunk_status}')`
+        `(${chunk.file_id}, ${chunk.chunk_offset}, ${connection.escape(chunk.chunk_data)}, '${chunk.chunk_status}')`
       ).join(',');
       
       await connection.execute(
