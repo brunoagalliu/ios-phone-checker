@@ -1,21 +1,22 @@
 import { NextResponse } from 'next/server';
-import { parsePhoneNumber, isValidPhoneNumber } from 'libphonenumber-js';
 import { getConnection } from '../../../lib/db.js';
 
 export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
 
-export async function POST(request) {
+// ✅ Main processing function
+async function processQueue(request) {
   const startTime = Date.now();
   const MAX_PROCESSING_TIME = 280000;
   
   console.log('\n=== PROCESS QUEUE TRIGGERED ===');
   console.log(`Time: ${new Date().toISOString()}`);
+  console.log(`Method: ${request?.method || 'CRON'}`);
+  
+  const pool = await getConnection();
   
   try {
-    const connection = await getConnection();
-    
-    const [files] = await connection.execute(
+    const [files] = await pool.execute(
       `SELECT * FROM uploaded_files 
        WHERE processing_status IN ('initialized', 'processing')
        AND processing_offset < processing_total
@@ -38,7 +39,7 @@ export async function POST(request) {
     console.log(`   Progress: ${file.processing_offset}/${file.processing_total} (${file.processing_progress}%)`);
     console.log(`   Service: ${file.service}`);
     
-    await connection.execute(
+    await pool.execute(
       `UPDATE uploaded_files 
        SET processing_status = 'processing'
        WHERE id = ?`,
@@ -49,7 +50,7 @@ export async function POST(request) {
     let chunksProcessed = 0;
     
     while (Date.now() - startTime < MAX_PROCESSING_TIME) {
-      const [chunks] = await connection.execute(
+      const [chunks] = await pool.execute(
         `SELECT * FROM processing_chunks
          WHERE file_id = ? 
          AND chunk_status = 'pending'
@@ -66,7 +67,7 @@ export async function POST(request) {
       const chunk = chunks[0];
       console.log(`\n📦 Processing chunk ${chunk.id} (offset: ${chunk.chunk_offset})`);
       
-      await connection.execute(
+      await pool.execute(
         `UPDATE processing_chunks 
          SET chunk_status = 'processing'
          WHERE id = ?`,
@@ -88,7 +89,7 @@ export async function POST(request) {
             break;
           }
           
-          const [cachedRows] = await connection.execute(
+          const [cachedRows] = await pool.execute(
             `SELECT * FROM blooio_cache WHERE phone_number = ? LIMIT 1`,
             [phone.e164]
           );
@@ -111,7 +112,6 @@ export async function POST(request) {
           }
           
           try {
-            // ✅ Use native fetch instead of axios
             const response = await fetch('https://api.blooio.com/v1/check', {
               method: 'POST',
               headers: {
@@ -131,7 +131,6 @@ export async function POST(request) {
             
             const data = await response.json();
             
-            // ✅ Parse Blooio's actual response format
             const capabilities = data?.capabilities || {};
             const supportsIMessage = capabilities.imessage === true;
             const supportsSMS = capabilities.sms === true;
@@ -149,7 +148,7 @@ export async function POST(request) {
             
             results.push(result);
             
-            await connection.execute(
+            await pool.execute(
               `INSERT INTO blooio_cache 
                (phone_number, is_ios, supports_imessage, supports_sms, contact_type, raw_response)
                VALUES (?, ?, ?, ?, ?, ?)
@@ -197,17 +196,17 @@ export async function POST(request) {
           console.log(`--- Saving ${results.length} results ---`);
           
           const values = results.map(r => 
-            `(${file.id}, ${connection.escape(r.phone_number)}, ${connection.escape(r.e164)}, ${r.is_ios}, ${r.supports_imessage}, ${r.supports_sms}, ${connection.escape(r.contact_type)}, ${connection.escape(r.error)}, ${r.from_cache ? 1 : 0})`
+            `(${file.id}, ${pool.escape(r.phone_number)}, ${pool.escape(r.e164)}, ${r.is_ios}, ${r.supports_imessage}, ${r.supports_sms}, ${pool.escape(r.contact_type)}, ${pool.escape(r.error)}, ${r.from_cache ? 1 : 0})`
           ).join(',');
           
-          await connection.execute(
+          await pool.execute(
             `INSERT INTO blooio_results 
              (file_id, phone_number, e164, is_ios, supports_imessage, supports_sms, contact_type, error, from_cache)
              VALUES ${values}`
           );
         }
         
-        await connection.execute(
+        await pool.execute(
           `UPDATE processing_chunks 
            SET chunk_status = 'completed'
            WHERE id = ?`,
@@ -217,7 +216,7 @@ export async function POST(request) {
         const newOffset = file.processing_offset + processedCount;
         const newProgress = ((newOffset / file.processing_total) * 100).toFixed(2);
         
-        await connection.execute(
+        await pool.execute(
           `UPDATE uploaded_files 
            SET processing_offset = ?,
                processing_progress = ?
@@ -234,14 +233,14 @@ export async function POST(request) {
       } catch (chunkError) {
         console.error('Chunk processing error:', chunkError);
         
-        await connection.execute(
+        await pool.execute(
           `UPDATE processing_chunks 
            SET chunk_status = 'failed'
            WHERE id = ?`,
           [chunk.id]
         );
         
-        await connection.execute(
+        await pool.execute(
           `UPDATE uploaded_files 
            SET last_error = ?
            WHERE id = ?`,
@@ -250,7 +249,7 @@ export async function POST(request) {
       }
     }
     
-    const [updatedFile] = await connection.execute(
+    const [updatedFile] = await pool.execute(
       `SELECT * FROM uploaded_files WHERE id = ?`,
       [file.id]
     );
@@ -260,7 +259,7 @@ export async function POST(request) {
     if (currentFile.processing_offset >= currentFile.processing_total) {
       console.log(`\n🎉 FILE ${file.id} COMPLETED!`);
       
-      await connection.execute(
+      await pool.execute(
         `UPDATE uploaded_files 
          SET processing_status = 'completed',
              processing_progress = 100
@@ -291,4 +290,13 @@ export async function POST(request) {
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     }, { status: 500 });
   }
+}
+
+// ✅ Export both GET and POST handlers
+export async function GET(request) {
+  return processQueue(request);
+}
+
+export async function POST(request) {
+  return processQueue(request);
 }
