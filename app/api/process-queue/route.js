@@ -111,85 +111,89 @@ async function processQueue(request) {
             continue;
           }
           
-          try {
-            const response = await fetch('https://api.blooio.com/v1/check', {
-              method: 'POST',
-              headers: {
-                'Authorization': `Bearer ${process.env.BLOOIO_API_KEY}`,
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                contact: phone.e164,
-                type: 'phone'
-              }),
-              signal: AbortSignal.timeout(10000)
-            });
-            
-            if (!response.ok) {
-              throw new Error(`Blooio API error: ${response.status}`);
-            }
-            
-            const data = await response.json();
-            
-            const capabilities = data?.capabilities || {};
-            const supportsIMessage = capabilities.imessage === true;
-            const supportsSMS = capabilities.sms === true;
-            
-            const result = {
-              phone_number: phone.original,
-              e164: phone.e164,
-              is_ios: supportsIMessage ? 1 : 0,
-              supports_imessage: supportsIMessage ? 1 : 0,
-              supports_sms: supportsSMS ? 1 : 0,
-              contact_type: supportsIMessage ? 'iPhone' : (supportsSMS ? 'Android' : 'Unknown'),
-              error: null,
-              from_cache: false
-            };
-            
-            results.push(result);
-            
-            await pool.execute(
-                `INSERT INTO blooio_cache 
-                 (e164, is_ios, supports_imessage, supports_sms, contact_type, raw_response)
-                 VALUES (?, ?, ?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE
-                 is_ios = VALUES(is_ios),
-                 supports_imessage = VALUES(supports_imessage),
-                 supports_sms = VALUES(supports_sms),
-                 contact_type = VALUES(contact_type),
-                 raw_response = VALUES(raw_response),
-                 updated_at = CURRENT_TIMESTAMP`,
-                [
-                  phone.e164,
-                  supportsIMessage ? 1 : 0,
-                  supportsIMessage ? 1 : 0,
-                  supportsSMS ? 1 : 0,
-                  result.contact_type,
-                  JSON.stringify(data)
-                ]
-              );
-            
-            processedCount++;
-            apiCalls++;
-            
-            await new Promise(resolve => setTimeout(resolve, 250));
-            
-          } catch (error) {
-            console.error(`API error for ${phone.e164}:`, error.message);
-            
-            results.push({
-              phone_number: phone.original,
-              e164: phone.e164,
-              is_ios: 0,
-              supports_imessage: 0,
-              supports_sms: 0,
-              contact_type: null,
-              error: error.message,
-              from_cache: false
-            });
-            
-            processedCount++;
-          }
+          // Not in cache - call Blooio API
+try {
+    // ✅ Correct Blooio API endpoint
+    const response = await fetch(
+      `https://backend.blooio.com/v1/api/contacts/${encodeURIComponent(phone.e164)}/capabilities`,
+      {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${process.env.BLOOIO_API_KEY}`
+        },
+        signal: AbortSignal.timeout(10000)
+      }
+    );
+    
+    if (!response.ok) {
+      console.error(`Blooio API error ${response.status} for ${phone.e164}`);
+      throw new Error(`Blooio API error: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    
+    // Parse Blooio response format
+    const capabilities = data?.capabilities || {};
+    const supportsIMessage = capabilities.imessage === true;
+    const supportsSMS = capabilities.sms === true;
+    
+    const result = {
+      phone_number: phone.original,
+      e164: phone.e164,
+      is_ios: supportsIMessage ? 1 : 0,
+      supports_imessage: supportsIMessage ? 1 : 0,
+      supports_sms: supportsSMS ? 1 : 0,
+      contact_type: supportsIMessage ? 'iPhone' : (supportsSMS ? 'Android' : 'Unknown'),
+      error: null,
+      from_cache: false
+    };
+    
+    results.push(result);
+    
+    // Save to cache
+    await pool.execute(
+      `INSERT INTO blooio_cache 
+       (e164, is_ios, supports_imessage, supports_sms, contact_type, raw_response)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+       is_ios = VALUES(is_ios),
+       supports_imessage = VALUES(supports_imessage),
+       supports_sms = VALUES(supports_sms),
+       contact_type = VALUES(contact_type),
+       raw_response = VALUES(raw_response),
+       updated_at = CURRENT_TIMESTAMP`,
+      [
+        phone.e164,
+        supportsIMessage ? 1 : 0,
+        supportsIMessage ? 1 : 0,
+        supportsSMS ? 1 : 0,
+        result.contact_type,
+        JSON.stringify(data)
+      ]
+    );
+    
+    processedCount++;
+    apiCalls++;
+    
+    // Rate limiting - 4 req/sec
+    await new Promise(resolve => setTimeout(resolve, 250));
+    
+  } catch (error) {
+    console.error(`API error for ${phone.e164}:`, error.message);
+    
+    results.push({
+      phone_number: phone.original,
+      e164: phone.e164,
+      is_ios: 0,
+      supports_imessage: 0,
+      supports_sms: 0,
+      contact_type: null,
+      error: error.message,
+      from_cache: false
+    });
+    
+    processedCount++;
+  }
         }
         
         if (results.length > 0) {
