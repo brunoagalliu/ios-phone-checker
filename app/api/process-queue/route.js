@@ -90,7 +90,7 @@ async function processQueue(request) {
           }
           
           const [cachedRows] = await pool.execute(
-            `SELECT * FROM blooio_cache WHERE phone_number = ? LIMIT 1`,
+            `SELECT * FROM blooio_cache WHERE e164 = ? LIMIT 1`,  // ✅ Use e164 column
             [phone.e164]
           );
           
@@ -149,25 +149,25 @@ async function processQueue(request) {
             results.push(result);
             
             await pool.execute(
-              `INSERT INTO blooio_cache 
-               (phone_number, is_ios, supports_imessage, supports_sms, contact_type, raw_response)
-               VALUES (?, ?, ?, ?, ?, ?)
-               ON DUPLICATE KEY UPDATE
-               is_ios = VALUES(is_ios),
-               supports_imessage = VALUES(supports_imessage),
-               supports_sms = VALUES(supports_sms),
-               contact_type = VALUES(contact_type),
-               raw_response = VALUES(raw_response),
-               updated_at = CURRENT_TIMESTAMP`,
-              [
-                phone.e164,
-                supportsIMessage ? 1 : 0,
-                supportsIMessage ? 1 : 0,
-                supportsSMS ? 1 : 0,
-                result.contact_type,
-                JSON.stringify(data)
-              ]
-            );
+                `INSERT INTO blooio_cache 
+                 (e164, is_ios, supports_imessage, supports_sms, contact_type, raw_response)
+                 VALUES (?, ?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                 is_ios = VALUES(is_ios),
+                 supports_imessage = VALUES(supports_imessage),
+                 supports_sms = VALUES(supports_sms),
+                 contact_type = VALUES(contact_type),
+                 raw_response = VALUES(raw_response),
+                 updated_at = CURRENT_TIMESTAMP`,
+                [
+                  phone.e164,
+                  supportsIMessage ? 1 : 0,
+                  supportsIMessage ? 1 : 0,
+                  supportsSMS ? 1 : 0,
+                  result.contact_type,
+                  JSON.stringify(data)
+                ]
+              );
             
             processedCount++;
             apiCalls++;
