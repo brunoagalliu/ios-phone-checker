@@ -151,24 +151,24 @@ try {
     results.push(result);
     
     // Save to cache
-    await pool.execute(
-        `INSERT INTO blooio_cache 
-         (e164, is_ios, supports_imessage, supports_sms, contact_type)
-         VALUES (?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-         is_ios = VALUES(is_ios),
-         supports_imessage = VALUES(supports_imessage),
-         supports_sms = VALUES(supports_sms),
-         contact_type = VALUES(contact_type),
-         updated_at = CURRENT_TIMESTAMP`,
-        [
-          phone.e164,
-          supportsIMessage ? 1 : 0,
-          supportsIMessage ? 1 : 0,
-          supportsSMS ? 1 : 0,
-          result.contact_type
-        ]
-      );
+    // Save to cache
+await pool.execute(
+    `INSERT INTO blooio_cache 
+     (e164, is_ios, supports_imessage, supports_sms, contact_type)
+     VALUES (?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+     is_ios = VALUES(is_ios),
+     supports_imessage = VALUES(supports_imessage),
+     supports_sms = VALUES(supports_sms),
+     contact_type = VALUES(contact_type)`,
+    [
+      phone.e164,
+      supportsIMessage ? 1 : 0,
+      supportsIMessage ? 1 : 0,
+      supportsSMS ? 1 : 0,
+      result.contact_type
+    ]
+  );
     
     processedCount++;
     apiCalls++;
