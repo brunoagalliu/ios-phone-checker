@@ -5,6 +5,8 @@ import { getConnection } from '../../../lib/db.js';
 export const maxDuration = 60;
 
 export async function POST(request) {
+  const pool = await getConnection(); // ✅ Get pool once
+  
   try {
     const contentType = request.headers.get('content-type');
     
@@ -14,10 +16,8 @@ export async function POST(request) {
       
       console.log(`📋 Initializing chunked upload file ${fileId} for ${service}`);
       
-      const connection = await getConnection();
-      
       // Get file info
-      const [files] = await connection.execute(
+      const [files] = await pool.execute(
         `SELECT * FROM uploaded_files WHERE id = ?`,
         [fileId]
       );
@@ -42,19 +42,27 @@ export async function POST(request) {
       console.log(`✓ Records: ${file.processing_total}`);
       console.log(`✓ Service: ${file.service}`);
       
-      // Trigger processing queue
+      // ✅ Fire-and-forget queue trigger (don't wait for response)
       try {
         const baseUrl = process.env.VERCEL_URL 
           ? `https://${process.env.VERCEL_URL}` 
           : 'http://localhost:3000';
         
-        const queueResponse = await fetch(`${baseUrl}/api/process-queue`, {
+        console.log(`🔔 Triggering processing queue at ${baseUrl}/api/process-queue`);
+        
+        // Fire and forget - don't await
+        fetch(`${baseUrl}/api/process-queue`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' }
+        }).then(response => {
+          if (response.ok) {
+            console.log('✓ Queue triggered successfully');
+          } else {
+            console.warn(`⚠️ Queue returned status ${response.status}`);
+          }
+        }).catch(err => {
+          console.warn('⚠️ Queue trigger failed (will be picked up by cron):', err.message);
         });
-        
-        const queueData = await queueResponse.json();
-        console.log('✓ Processing queue triggered:', queueData);
         
       } catch (triggerError) {
         console.warn('⚠️ Could not trigger queue (will be picked up by cron):', triggerError.message);
@@ -120,10 +128,10 @@ export async function POST(request) {
           continue;
         }
         
-        // ✅ Clean the phone number - remove non-digits except +
+        // Clean the phone number
         let cleanedPhone = phoneNumber.replace(/[^\d+]/g, '');
         
-        // ✅ Add country code if missing
+        // Add country code if missing
         if (cleanedPhone.length === 10 && !cleanedPhone.startsWith('+')) {
           cleanedPhone = '+1' + cleanedPhone;
         } else if (cleanedPhone.length === 11 && cleanedPhone.startsWith('1') && !cleanedPhone.startsWith('+')) {
@@ -131,8 +139,6 @@ export async function POST(request) {
         } else if (!cleanedPhone.startsWith('+')) {
           cleanedPhone = '+' + cleanedPhone;
         }
-        
-        console.log(`Processing: "${phoneNumber}" → "${cleanedPhone}"`);
         
         if (isValidPhoneNumber(cleanedPhone)) {
           const parsed = parsePhoneNumber(cleanedPhone);
@@ -142,11 +148,9 @@ export async function POST(request) {
             e164: e164
           });
         } else {
-          console.warn(`Invalid after cleaning: "${phoneNumber}" → "${cleanedPhone}"`);
           invalidPhones.push({ line: i + 2, phone: phoneNumber, reason: 'Invalid format' });
         }
       } catch (error) {
-        console.error(`Parse error for "${phoneNumber}":`, error.message);
         invalidPhones.push({ line: i + 2, phone: phoneNumber, reason: error.message });
       }
     }
@@ -163,27 +167,34 @@ export async function POST(request) {
       }, { status: 400 });
     }
     
-    // Save to database
-    const connection = await getConnection();
+    // ✅ DEDUPLICATE PHONES
+    const uniquePhones = [...new Map(
+      validPhones.map(p => [p.e164, p])
+    ).values()];
     
-    const [result] = await connection.execute(
+    console.log(`✓ Original phones: ${validPhones.length}`);
+    console.log(`✓ Unique phones: ${uniquePhones.length}`);
+    console.log(`✓ Duplicates removed: ${validPhones.length - uniquePhones.length}`);
+    
+    // Save to database
+    const [result] = await pool.execute(
       `INSERT INTO uploaded_files 
        (file_name, upload_status, processing_status, service, 
         upload_date, processing_total, processing_offset, processing_progress)
        VALUES (?, 'completed', 'initialized', ?, NOW(), ?, 0, 0)`,
-      [file.name, service, validPhones.length]
+      [file.name, service, uniquePhones.length]
     );
     
     const fileId = result.insertId;
     
     console.log(`✓ File saved with ID: ${fileId}`);
     
-    // Create processing chunks
+    // Create processing chunks with UNIQUE phones
     const CHUNK_SIZE = service === 'blooio' ? 500 : 1000;
     const chunks = [];
     
-    for (let i = 0; i < validPhones.length; i += CHUNK_SIZE) {
-      const chunkPhones = validPhones.slice(i, i + CHUNK_SIZE);
+    for (let i = 0; i < uniquePhones.length; i += CHUNK_SIZE) {
+      const chunkPhones = uniquePhones.slice(i, i + CHUNK_SIZE);
       chunks.push({
         file_id: fileId,
         chunk_offset: i,
@@ -194,32 +205,55 @@ export async function POST(request) {
     
     console.log(`Creating ${chunks.length} processing chunks...`);
     
-    // Batch insert chunks
+    // ✅ Batch insert chunks to prevent "packets out of order"
     if (chunks.length > 0) {
-      const values = chunks.map(chunk => 
-        `(${chunk.file_id}, ${chunk.chunk_offset}, ${connection.escape(chunk.chunk_data)}, '${chunk.chunk_status}')`
-      ).join(',');
+      const BATCH_SIZE = 100;
+      let inserted = 0;
       
-      await connection.execute(
-        `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
-         VALUES ${values}`
-      );
+      for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+        const batch = chunks.slice(i, i + BATCH_SIZE);
+        
+        const values = batch.map(chunk => 
+          `(${chunk.file_id}, ${chunk.chunk_offset}, ${pool.escape(chunk.chunk_data)}, '${chunk.chunk_status}')`
+        ).join(',');
+        
+        await pool.execute(
+          `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
+           VALUES ${values}`
+        );
+        
+        inserted += batch.length;
+        
+        if ((i / BATCH_SIZE) % 5 === 0 || inserted === chunks.length) {
+          console.log(`✓ Inserted ${inserted}/${chunks.length} processing chunks`);
+        }
+      }
       
-      console.log(`✓ ${chunks.length} chunks created`);
+      console.log(`✅ ${chunks.length} chunks created successfully`);
     }
     
-    // Trigger processing
+    // ✅ Fire-and-forget queue trigger
     try {
       const baseUrl = process.env.VERCEL_URL 
         ? `https://${process.env.VERCEL_URL}` 
         : 'http://localhost:3000';
       
-      await fetch(`${baseUrl}/api/process-queue`, {
+      console.log(`🔔 Triggering processing queue...`);
+      
+      // Fire and forget - don't await
+      fetch(`${baseUrl}/api/process-queue`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
+      }).then(response => {
+        if (response.ok) {
+          console.log('✓ Queue triggered successfully');
+        } else {
+          console.warn(`⚠️ Queue returned status ${response.status}`);
+        }
+      }).catch(err => {
+        console.warn('⚠️ Queue trigger failed (will be picked up by cron):', err.message);
       });
       
-      console.log('✓ Processing queue triggered');
     } catch (triggerError) {
       console.warn('⚠️ Could not trigger queue:', triggerError.message);
     }
@@ -228,11 +262,12 @@ export async function POST(request) {
       success: true,
       fileId: fileId,
       fileName: file.name,
-      totalRecords: validPhones.length,
+      totalRecords: uniquePhones.length,
+      duplicatesRemoved: validPhones.length - uniquePhones.length,
       invalidRecords: invalidPhones.length,
       chunks: chunks.length,
       service: service,
-      message: `File initialized with ${validPhones.length} valid phone numbers`
+      message: `File initialized with ${uniquePhones.length} unique phone numbers`
     });
     
   } catch (error) {
