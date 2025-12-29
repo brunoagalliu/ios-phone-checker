@@ -4,6 +4,8 @@ import { getConnection } from '../../../lib/db.js';
 export const maxDuration = 60;
 
 export async function POST(request) {
+  const pool = await getConnection(); // ✅ Get pool once
+  
   try {
     const formData = await request.formData();
     
@@ -19,11 +21,9 @@ export async function POST(request) {
     console.log(`   Has header: ${hasHeader}`);
     console.log(`   Chunk size: ${chunkData.length} chars`);
     
-    const connection = await getConnection();
-    
     // First chunk: Create upload record
     if (chunkIndex === 0) {
-      const [result] = await connection.execute(
+      const [result] = await pool.execute(
         `INSERT INTO uploaded_files 
          (file_name, upload_status, service, upload_date, chunk_count, chunks_received)
          VALUES (?, 'uploading', ?, NOW(), ?, 0)`,
@@ -35,13 +35,13 @@ export async function POST(request) {
       console.log(`✓ Created file record ${fileId}`);
       
       // Store chunk
-      await connection.execute(
+      await pool.execute(
         `INSERT INTO file_chunks (file_id, chunk_index, chunk_data)
          VALUES (?, ?, ?)`,
         [fileId, chunkIndex, chunkData]
       );
       
-      await connection.execute(
+      await pool.execute(
         `UPDATE uploaded_files SET chunks_received = 1 WHERE id = ?`,
         [fileId]
       );
@@ -59,14 +59,14 @@ export async function POST(request) {
     // Subsequent chunks: Store chunk data
     const fileId = parseInt(uploadId);
     
-    await connection.execute(
+    await pool.execute(
       `INSERT INTO file_chunks (file_id, chunk_index, chunk_data)
        VALUES (?, ?, ?)`,
       [fileId, chunkIndex, chunkData]
     );
     
     // Update chunks received count
-    await connection.execute(
+    await pool.execute(
       `UPDATE uploaded_files 
        SET chunks_received = chunks_received + 1
        WHERE id = ?`,
@@ -76,7 +76,7 @@ export async function POST(request) {
     console.log(`✓ Stored chunk ${chunkIndex + 1}/${totalChunks}`);
     
     // Check if all chunks received
-    const [file] = await connection.execute(
+    const [file] = await pool.execute(
       `SELECT chunks_received, chunk_count FROM uploaded_files WHERE id = ?`,
       [fileId]
     );
@@ -87,7 +87,7 @@ export async function POST(request) {
       console.log(`\n✅ All chunks received for upload ${fileId} - Processing...`);
       
       // Merge chunks
-      const [chunks] = await connection.execute(
+      const [chunks] = await pool.execute(
         `SELECT chunk_data FROM file_chunks 
          WHERE file_id = ? 
          ORDER BY chunk_index ASC`,
@@ -95,7 +95,7 @@ export async function POST(request) {
       );
       
       // First chunk has header, rest don't
-      const firstChunk = chunks[0].chunk_data; // Has header
+      const firstChunk = chunks[0].chunk_data;
       const restChunks = chunks.slice(1).map(c => c.chunk_data).join('\n');
       
       const fullContent = firstChunk + (restChunks ? '\n' + restChunks : '');
@@ -129,7 +129,7 @@ export async function POST(request) {
         if (!line) continue;
         
         const parts = line.split(',');
-        let phoneNumber = parts[0].trim(); // Remove trailing spaces
+        let phoneNumber = parts[0].trim();
         
         try {
           if (!phoneNumber) {
@@ -144,7 +144,6 @@ export async function POST(request) {
           }
           
           // Clean the phone number
-          // Remove any non-digit characters except +
           let cleanedPhone = phoneNumber.replace(/[^\d+]/g, '');
           
           // If it's a 10-digit US number, add +1
@@ -164,7 +163,7 @@ export async function POST(request) {
           if (isValidPhoneNumber(cleanedPhone)) {
             const parsed = parsePhoneNumber(cleanedPhone);
             validPhones.push({
-              original: phoneNumber, // Keep original from file
+              original: phoneNumber,
               e164: parsed.format('E.164')
             });
           } else {
@@ -205,12 +204,21 @@ export async function POST(request) {
         throw new Error('No valid phone numbers found in file');
       }
       
-      // Create processing chunks
+      // ✅ DEDUPLICATE PHONES
+      const uniquePhones = [...new Map(
+        validPhones.map(p => [p.e164, p])
+      ).values()];
+      
+      console.log(`✓ Original phones: ${validPhones.length}`);
+      console.log(`✓ Unique phones: ${uniquePhones.length}`);
+      console.log(`✓ Duplicates removed: ${validPhones.length - uniquePhones.length}`);
+      
+      // Create processing chunks with UNIQUE phones
       const CHUNK_SIZE = service === 'blooio' ? 500 : 1000;
       const processingChunks = [];
       
-      for (let i = 0; i < validPhones.length; i += CHUNK_SIZE) {
-        const chunkPhones = validPhones.slice(i, i + CHUNK_SIZE);
+      for (let i = 0; i < uniquePhones.length; i += CHUNK_SIZE) {
+        const chunkPhones = uniquePhones.slice(i, i + CHUNK_SIZE);
         processingChunks.push({
           file_id: fileId,
           chunk_offset: i,
@@ -221,22 +229,32 @@ export async function POST(request) {
       
       console.log(`✓ Creating ${processingChunks.length} processing chunks...`);
       
-      // Insert processing chunks
-      if (processingChunks.length > 0) {
-        const values = processingChunks.map(chunk => 
-          `(${chunk.file_id}, ${chunk.chunk_offset}, ${connection.escape(chunk.chunk_data)}, '${chunk.chunk_status}')`
-        ).join(',');
-        
-        await connection.execute(
-          `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
-           VALUES ${values}`
-        );
-        
-        console.log(`✓ ${processingChunks.length} processing chunks created`);
+      // ✅ Check if processing chunks already exist (prevent duplicates)
+      const [existingChunks] = await pool.execute(
+        `SELECT COUNT(*) as count FROM processing_chunks WHERE file_id = ?`,
+        [fileId]
+      );
+      
+      if (existingChunks[0].count > 0) {
+        console.log(`⚠️ Processing chunks already exist for file ${fileId}, skipping creation`);
+      } else {
+        // Insert processing chunks
+        if (processingChunks.length > 0) {
+          const values = processingChunks.map(chunk => 
+            `(${chunk.file_id}, ${chunk.chunk_offset}, ${pool.escape(chunk.chunk_data)}, '${chunk.chunk_status}')`
+          ).join(',');
+          
+          await pool.execute(
+            `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
+             VALUES ${values}`
+          );
+          
+          console.log(`✓ ${processingChunks.length} processing chunks created`);
+        }
       }
       
       // Update file record
-      await connection.execute(
+      await pool.execute(
         `UPDATE uploaded_files 
          SET upload_status = 'completed',
              processing_status = 'initialized',
@@ -244,26 +262,27 @@ export async function POST(request) {
              processing_offset = 0,
              processing_progress = 0
          WHERE id = ?`,
-        [validPhones.length, fileId]
+        [uniquePhones.length, fileId]
       );
       
       console.log(`✓ File record updated`);
       
-      // Clean up upload chunks (NOW it's safe to delete)
-      await connection.execute(
+      // Clean up upload chunks
+      await pool.execute(
         `DELETE FROM file_chunks WHERE file_id = ?`,
         [fileId]
       );
       
       console.log(`✓ Upload chunks cleaned up`);
-      console.log(`✅ File ${fileId} ready for processing with ${validPhones.length} phones\n`);
+      console.log(`✅ File ${fileId} ready for processing with ${uniquePhones.length} unique phones\n`);
       
       return NextResponse.json({
         success: true,
         uploadId: fileId,
         chunkIndex: chunkIndex,
         complete: true,
-        totalRecords: validPhones.length,
+        totalRecords: uniquePhones.length,
+        duplicatesRemoved: validPhones.length - uniquePhones.length,
         invalidRecords: invalidPhones.length,
         processingChunks: processingChunks.length,
         message: 'Upload complete and processing chunks created'
