@@ -239,18 +239,32 @@ export async function POST(request) {
         console.log(`⚠️ Processing chunks already exist for file ${fileId}, skipping creation`);
       } else {
         // Insert processing chunks
-        if (processingChunks.length > 0) {
-          const values = processingChunks.map(chunk => 
-            `(${chunk.file_id}, ${chunk.chunk_offset}, ${pool.escape(chunk.chunk_data)}, '${chunk.chunk_status}')`
-          ).join(',');
-          
-          await pool.execute(
-            `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
-             VALUES ${values}`
-          );
-          
-          console.log(`✓ ${processingChunks.length} processing chunks created`);
-        }
+        // ✅ Insert processing chunks in batches to avoid "packets out of order"
+if (processingChunks.length > 0) {
+    const BATCH_SIZE = 100;
+    let inserted = 0;
+    
+    for (let i = 0; i < processingChunks.length; i += BATCH_SIZE) {
+      const batch = processingChunks.slice(i, i + BATCH_SIZE);
+      
+      const values = batch.map(chunk => 
+        `(${chunk.file_id}, ${chunk.chunk_offset}, ${pool.escape(chunk.chunk_data)}, '${chunk.chunk_status}')`
+      ).join(',');
+      
+      await pool.execute(
+        `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
+         VALUES ${values}`
+      );
+      
+      inserted += batch.length;
+      
+      if ((i / BATCH_SIZE) % 5 === 0 || inserted === processingChunks.length) {
+        console.log(`✓ Inserted ${inserted}/${processingChunks.length} processing chunks`);
+      }
+    }
+    
+    console.log(`✅ ${processingChunks.length} processing chunks created successfully`);
+  }
       }
       
       // Update file record
