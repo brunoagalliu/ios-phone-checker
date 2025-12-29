@@ -1,14 +1,13 @@
 import { NextResponse } from 'next/server';
 import { parsePhoneNumber, isValidPhoneNumber } from 'libphonenumber-js';
 import { getConnection } from '../../../lib/db.js';
-import axios from 'axios';
 
 export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
 
 export async function POST(request) {
   const startTime = Date.now();
-  const MAX_PROCESSING_TIME = 280000; // 280 seconds (leave 20s buffer)
+  const MAX_PROCESSING_TIME = 280000;
   
   console.log('\n=== PROCESS QUEUE TRIGGERED ===');
   console.log(`Time: ${new Date().toISOString()}`);
@@ -16,7 +15,6 @@ export async function POST(request) {
   try {
     const connection = await getConnection();
     
-    // Find next file to process
     const [files] = await connection.execute(
       `SELECT * FROM uploaded_files 
        WHERE processing_status IN ('initialized', 'processing')
@@ -40,7 +38,6 @@ export async function POST(request) {
     console.log(`   Progress: ${file.processing_offset}/${file.processing_total} (${file.processing_progress}%)`);
     console.log(`   Service: ${file.service}`);
     
-    // Update status to processing
     await connection.execute(
       `UPDATE uploaded_files 
        SET processing_status = 'processing'
@@ -51,9 +48,7 @@ export async function POST(request) {
     let totalProcessed = 0;
     let chunksProcessed = 0;
     
-    // Process chunks until time runs out
     while (Date.now() - startTime < MAX_PROCESSING_TIME) {
-      // Get next pending chunk
       const [chunks] = await connection.execute(
         `SELECT * FROM processing_chunks
          WHERE file_id = ? 
@@ -71,7 +66,6 @@ export async function POST(request) {
       const chunk = chunks[0];
       console.log(`\n📦 Processing chunk ${chunk.id} (offset: ${chunk.chunk_offset})`);
       
-      // Mark chunk as processing
       await connection.execute(
         `UPDATE processing_chunks 
          SET chunk_status = 'processing'
@@ -80,7 +74,6 @@ export async function POST(request) {
       );
       
       try {
-        // Parse chunk data
         const phoneData = JSON.parse(chunk.chunk_data);
         console.log(`   Phones in chunk: ${phoneData.length}`);
         
@@ -89,15 +82,12 @@ export async function POST(request) {
         let cacheHits = 0;
         let apiCalls = 0;
         
-        // Process each phone
         for (const phone of phoneData) {
-          // Check if we're running out of time
           if (Date.now() - startTime > MAX_PROCESSING_TIME) {
             console.log(`⚠️ Timeout - processed ${processedCount}/${phoneData.length}`);
             break;
           }
           
-          // Check cache first
           const [cachedRows] = await connection.execute(
             `SELECT * FROM blooio_cache WHERE phone_number = ? LIMIT 1`,
             [phone.e164]
@@ -120,25 +110,29 @@ export async function POST(request) {
             continue;
           }
           
-          // Not in cache - call Blooio API
           try {
-            const response = await axios.post(
-              'https://api.blooio.com/v1/check',
-              {
+            // ✅ Use native fetch instead of axios
+            const response = await fetch('https://api.blooio.com/v1/check', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${process.env.BLOOIO_API_KEY}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({
                 contact: phone.e164,
                 type: 'phone'
-              },
-              {
-                headers: {
-                  'Authorization': `Bearer ${process.env.BLOOIO_API_KEY}`,
-                  'Content-Type': 'application/json'
-                },
-                timeout: 10000
-              }
-            );
+              }),
+              signal: AbortSignal.timeout(10000)
+            });
+            
+            if (!response.ok) {
+              throw new Error(`Blooio API error: ${response.status}`);
+            }
+            
+            const data = await response.json();
             
             // ✅ Parse Blooio's actual response format
-            const capabilities = response.data?.capabilities || {};
+            const capabilities = data?.capabilities || {};
             const supportsIMessage = capabilities.imessage === true;
             const supportsSMS = capabilities.sms === true;
             
@@ -155,7 +149,6 @@ export async function POST(request) {
             
             results.push(result);
             
-            // Save to cache
             await connection.execute(
               `INSERT INTO blooio_cache 
                (phone_number, is_ios, supports_imessage, supports_sms, contact_type, raw_response)
@@ -173,14 +166,13 @@ export async function POST(request) {
                 supportsIMessage ? 1 : 0,
                 supportsSMS ? 1 : 0,
                 result.contact_type,
-                JSON.stringify(response.data)
+                JSON.stringify(data)
               ]
             );
             
             processedCount++;
             apiCalls++;
             
-            // Rate limiting - 4 req/sec
             await new Promise(resolve => setTimeout(resolve, 250));
             
           } catch (error) {
@@ -201,7 +193,6 @@ export async function POST(request) {
           }
         }
         
-        // Save results
         if (results.length > 0) {
           console.log(`--- Saving ${results.length} results ---`);
           
@@ -216,7 +207,6 @@ export async function POST(request) {
           );
         }
         
-        // Mark chunk as completed
         await connection.execute(
           `UPDATE processing_chunks 
            SET chunk_status = 'completed'
@@ -224,7 +214,6 @@ export async function POST(request) {
           [chunk.id]
         );
         
-        // Update file progress
         const newOffset = file.processing_offset + processedCount;
         const newProgress = ((newOffset / file.processing_total) * 100).toFixed(2);
         
@@ -245,7 +234,6 @@ export async function POST(request) {
       } catch (chunkError) {
         console.error('Chunk processing error:', chunkError);
         
-        // Mark chunk as failed
         await connection.execute(
           `UPDATE processing_chunks 
            SET chunk_status = 'failed'
@@ -253,7 +241,6 @@ export async function POST(request) {
           [chunk.id]
         );
         
-        // Update file with error
         await connection.execute(
           `UPDATE uploaded_files 
            SET last_error = ?
@@ -263,7 +250,6 @@ export async function POST(request) {
       }
     }
     
-    // Check if file is complete
     const [updatedFile] = await connection.execute(
       `SELECT * FROM uploaded_files WHERE id = ?`,
       [file.id]
