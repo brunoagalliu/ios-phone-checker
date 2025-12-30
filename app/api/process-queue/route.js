@@ -4,10 +4,9 @@ import { getConnection } from '../../../lib/db.js';
 export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
 
-// ✅ Main processing function
 async function processQueue(request) {
   const startTime = Date.now();
-  const MAX_PROCESSING_TIME = 280000;
+  const MAX_PROCESSING_TIME = 280000; // 280 seconds
   
   console.log('\n=== PROCESS QUEUE TRIGGERED ===');
   console.log(`Time: ${new Date().toISOString()}`);
@@ -84,164 +83,135 @@ async function processQueue(request) {
         let apiCalls = 0;
         
         for (const phone of phoneData) {
-            if (Date.now() - startTime > MAX_PROCESSING_TIME) {
-              console.log(`⚠️ Timeout - processed ${processedCount}/${phoneData.length}`);
-              break;
-            }
-            
-            // ✅ Add detailed logging
-            if (processedCount % 10 === 0) {
-              console.log(`\n📞 Phone ${processedCount + 1}/${phoneData.length}: ${phone.e164}`);
-            }
-            
-            // Check cache first
-            const [cachedRows] = await pool.execute(
-              `SELECT * FROM blooio_cache WHERE e164 = ? LIMIT 1`,
-              [phone.e164]
-            );
-            
-            // ✅ Log first few cache attempts
-            if (processedCount < 5) {
-              console.log(`   🔍 Cache lookup for: "${phone.e164}"`);
-              console.log(`   📊 Result: ${cachedRows.length} rows`);
-              if (cachedRows.length > 0) {
-                console.log(`   ✅ CACHE HIT!`, cachedRows[0]);
-              } else {
-                console.log(`   ❌ CACHE MISS - will call API`);
-                
-                // Check if it exists with different format
-                const [testRows] = await pool.execute(
-                  `SELECT e164 FROM blooio_cache WHERE e164 LIKE ? LIMIT 1`,
-                  [`%${phone.e164.slice(-10)}%`]
-                );
-                if (testRows.length > 0) {
-                  console.log(`   ⚠️ Found similar in cache: "${testRows[0].e164}"`);
-                }
-              }
-            }
-            
-            if (cachedRows.length > 0) {
-              const cached = cachedRows[0];
-              results.push({
-                phone_number: phone.original,
-                e164: phone.e164,
-                is_ios: cached.is_ios || 0,
-                supports_imessage: cached.supports_imessage || 0,
-                supports_sms: cached.supports_sms || 0,
-                contact_type: cached.contact_type || null,
-                error: cached.error || null,
-                from_cache: true
-              });
-              processedCount++;
-              cacheHits++;
-              continue;
-            }
-          
-          // Not in cache - call Blooio API
-try {
-    // ✅ Correct Blooio API endpoint
-    const response = await fetch(
-      `https://backend.blooio.com/v1/api/contacts/${encodeURIComponent(phone.e164)}/capabilities`,
-      {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${process.env.BLOOIO_API_KEY}`
-        },
-        signal: AbortSignal.timeout(10000)
-      }
-    );
-    
-    if (!response.ok) {
-      console.error(`Blooio API error ${response.status} for ${phone.e164}`);
-      throw new Error(`Blooio API error: ${response.status}`);
-    }
-    
-    const data = await response.json();
-    
-    // Parse Blooio response format
-    const capabilities = data?.capabilities || {};
-    const supportsIMessage = capabilities.imessage === true;
-    const supportsSMS = capabilities.sms === true;
-    
-    const result = {
-      phone_number: phone.original,
-      e164: phone.e164,
-      is_ios: supportsIMessage ? 1 : 0,
-      supports_imessage: supportsIMessage ? 1 : 0,
-      supports_sms: supportsSMS ? 1 : 0,
-      contact_type: supportsIMessage ? 'iPhone' : (supportsSMS ? 'Android' : 'Unknown'),
-      error: null,
-      from_cache: false
-    };
-    
-    results.push(result);
-    
-    // Save to cache
-    // Save to cache
-await pool.execute(
-    `INSERT INTO blooio_cache 
-     (e164, is_ios, supports_imessage, supports_sms, contact_type)
-     VALUES (?, ?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE
-     is_ios = VALUES(is_ios),
-     supports_imessage = VALUES(supports_imessage),
-     supports_sms = VALUES(supports_sms),
-     contact_type = VALUES(contact_type)`,
-    [
-      phone.e164,
-      supportsIMessage ? 1 : 0,
-      supportsIMessage ? 1 : 0,
-      supportsSMS ? 1 : 0,
-      result.contact_type
-    ]
-  );
-    
-    processedCount++;
-    apiCalls++;
-    
-    // Rate limiting - 4 req/sec
-    await new Promise(resolve => setTimeout(resolve, 250));
-    
-  } catch (error) {
-    console.error(`API error for ${phone.e164}:`, error.message);
-    
-    results.push({
-      phone_number: phone.original,
-      e164: phone.e164,
-      is_ios: 0,
-      supports_imessage: 0,
-      supports_sms: 0,
-      contact_type: null,
-      error: error.message,
-      from_cache: false
-    });
-    
-    processedCount++;
-  }
-        }
-        // Save results
-        if (results.length > 0) {
-            console.log(`--- Saving ${results.length} results ---`);
-            
-            try {
-              const values = results.map(r => 
-                `(${file.id}, ${pool.escape(r.phone_number)}, ${pool.escape(r.e164)}, ${r.is_ios}, ${r.supports_imessage}, ${r.supports_sms}, ${pool.escape(r.contact_type)}, ${pool.escape(r.error)}, ${r.from_cache ? 1 : 0})`
-              ).join(',');
-              
-              await pool.execute(
-                `INSERT INTO blooio_results 
-                 (file_id, phone_number, e164, is_ios, supports_imessage, supports_sms, contact_type, error, from_cache)
-                 VALUES ${values}`
-              );
-              
-              console.log(`✅ Saved ${results.length} results to database`);
-              
-            } catch (saveError) {
-              console.error('❌ Failed to save results:', saveError);
-              throw saveError;
-            }
+          // Check timeout BEFORE processing
+          if (Date.now() - startTime > MAX_PROCESSING_TIME) {
+            console.log(`⚠️ Timeout - processed ${processedCount}/${phoneData.length}`);
+            break;
           }
           
+          // Check cache first
+          const [cachedRows] = await pool.execute(
+            `SELECT * FROM blooio_cache WHERE e164 = ? LIMIT 1`,
+            [phone.e164]
+          );
+          
+          if (cachedRows.length > 0) {
+            const cached = cachedRows[0];
+            results.push({
+              phone_number: phone.original,
+              e164: phone.e164,
+              is_ios: cached.is_ios || 0,
+              supports_imessage: cached.supports_imessage || 0,
+              supports_sms: cached.supports_sms || 0,
+              contact_type: cached.contact_type || null,
+              error: cached.error || null,
+              from_cache: true
+            });
+            processedCount++;
+            cacheHits++;
+            continue;
+          }
+          
+          // Not in cache - call Blooio API
+          try {
+            const response = await fetch(
+              `https://backend.blooio.com/v1/api/contacts/${encodeURIComponent(phone.e164)}/capabilities`,
+              {
+                method: 'GET',
+                headers: {
+                  'Authorization': `Bearer ${process.env.BLOOIO_API_KEY}`
+                },
+                signal: AbortSignal.timeout(10000)
+              }
+            );
+            
+            if (!response.ok) {
+              throw new Error(`Blooio API error: ${response.status}`);
+            }
+            
+            const data = await response.json();
+            
+            const capabilities = data?.capabilities || {};
+            const supportsIMessage = capabilities.imessage === true;
+            const supportsSMS = capabilities.sms === true;
+            
+            const result = {
+              phone_number: phone.original,
+              e164: phone.e164,
+              is_ios: supportsIMessage ? 1 : 0,
+              supports_imessage: supportsIMessage ? 1 : 0,
+              supports_sms: supportsSMS ? 1 : 0,
+              contact_type: supportsIMessage ? 'iPhone' : (supportsSMS ? 'Android' : 'Unknown'),
+              error: null,
+              from_cache: false
+            };
+            
+            results.push(result);
+            
+            // Save to cache
+            await pool.execute(
+              `INSERT INTO blooio_cache 
+               (e164, is_ios, supports_imessage, supports_sms, contact_type)
+               VALUES (?, ?, ?, ?, ?)
+               ON DUPLICATE KEY UPDATE
+               is_ios = VALUES(is_ios),
+               supports_imessage = VALUES(supports_imessage),
+               supports_sms = VALUES(supports_sms),
+               contact_type = VALUES(contact_type)`,
+              [
+                phone.e164,
+                supportsIMessage ? 1 : 0,
+                supportsIMessage ? 1 : 0,
+                supportsSMS ? 1 : 0,
+                result.contact_type
+              ]
+            );
+            
+            processedCount++;
+            apiCalls++;
+            
+            // Rate limiting - 4 req/sec
+            await new Promise(resolve => setTimeout(resolve, 250));
+            
+          } catch (error) {
+            console.error(`API error for ${phone.e164}:`, error.message);
+            
+            results.push({
+              phone_number: phone.original,
+              e164: phone.e164,
+              is_ios: 0,
+              supports_imessage: 0,
+              supports_sms: 0,
+              contact_type: null,
+              error: error.message,
+              from_cache: false
+            });
+            
+            processedCount++;
+          }
+        }
+        
+        // Save results
+        if (results.length > 0) {
+          console.log(`--- Saving ${results.length} results ---`);
+          
+          const values = results.map(r => 
+            `(${file.id}, ${pool.escape(r.phone_number)}, ${pool.escape(r.e164)}, ${r.is_ios}, ${r.supports_imessage}, ${r.supports_sms}, ${pool.escape(r.contact_type)}, ${pool.escape(r.error)}, ${r.from_cache ? 1 : 0})`
+          ).join(',');
+          
+          await pool.execute(
+            `INSERT INTO blooio_results 
+             (file_id, phone_number, e164, is_ios, supports_imessage, supports_sms, contact_type, error, from_cache)
+             VALUES ${values}`
+          );
+          
+          console.log(`✅ Saved ${results.length} results to database`);
+        }
+        
+        // ✅ Check if chunk was fully processed
+        const fullyProcessed = processedCount === phoneData.length;
+        
+        if (fullyProcessed) {
           // Mark chunk as completed
           await pool.execute(
             `UPDATE processing_chunks 
@@ -250,33 +220,57 @@ await pool.execute(
             [chunk.id]
           );
           
-          console.log(`✅ Marked chunk ${chunk.id} as completed`);
+          console.log(`✅ Chunk ${chunk.id} fully completed (${processedCount}/${phoneData.length})`);
           
-          // ✅ UPDATE FILE PROGRESS - Use database-side increment
-          console.log(`📊 Updating file progress: +${processedCount} phones`);
+        } else {
+          // ✅ Partial completion - create new chunk with remaining phones
+          const remainingPhones = phoneData.slice(processedCount);
           
+          console.log(`⚠️ Chunk partially completed: ${processedCount}/${phoneData.length}`);
+          console.log(`   Creating new chunk with ${remainingPhones.length} remaining phones`);
+          
+          // Insert new chunk with remaining phones
           await pool.execute(
-            `UPDATE uploaded_files 
-             SET processing_offset = processing_offset + ?,
-                 processing_progress = ROUND((processing_offset + ?) / processing_total * 100, 2)
+            `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
+             VALUES (?, ?, ?, 'pending')`,
+            [
+              file.id,
+              chunk.chunk_offset + processedCount,
+              JSON.stringify(remainingPhones)
+            ]
+          );
+          
+          // Mark original chunk as completed (it's been split)
+          await pool.execute(
+            `UPDATE processing_chunks 
+             SET chunk_status = 'completed'
              WHERE id = ?`,
-            [processedCount, processedCount, file.id]
+            [chunk.id]
           );
           
-          // Verify the update worked
-          const [verifyFile] = await pool.execute(
-            `SELECT processing_offset, processing_progress FROM uploaded_files WHERE id = ?`,
-            [file.id]
-          );
-          
-          console.log(`   New offset: ${verifyFile[0].processing_offset} / ${file.processing_total}`);
-          console.log(`   New progress: ${verifyFile[0].processing_progress}%`);
-          
-          totalProcessed += processedCount;
-          chunksProcessed++;
-          
-          console.log(`✅ Chunk completed: ${verifyFile[0].processing_offset}/${file.processing_total} (${verifyFile[0].processing_progress}%)`);
-          console.log(`   Cache hits: ${cacheHits}, API calls: ${apiCalls}`);
+          console.log(`✅ Original chunk marked complete, new chunk created at offset ${chunk.chunk_offset + processedCount}`);
+        }
+        
+        // ✅ Update file progress by actual processed count
+        await pool.execute(
+          `UPDATE uploaded_files 
+           SET processing_offset = processing_offset + ?,
+               processing_progress = ROUND((processing_offset + ?) / processing_total * 100, 2)
+           WHERE id = ?`,
+          [processedCount, processedCount, file.id]
+        );
+        
+        // Get updated values
+        const [updatedFile] = await pool.execute(
+          `SELECT processing_offset, processing_progress FROM uploaded_files WHERE id = ?`,
+          [file.id]
+        );
+        
+        totalProcessed += processedCount;
+        chunksProcessed++;
+        
+        console.log(`✅ Chunk completed: ${updatedFile[0].processing_offset}/${file.processing_total} (${updatedFile[0].processing_progress}%)`);
+        console.log(`   Cache hits: ${cacheHits}, API calls: ${apiCalls}`);
         
       } catch (chunkError) {
         console.error('Chunk processing error:', chunkError);
@@ -297,6 +291,7 @@ await pool.execute(
       }
     }
     
+    // Check if file is complete
     const [updatedFile] = await pool.execute(
       `SELECT * FROM uploaded_files WHERE id = ?`,
       [file.id]
@@ -340,7 +335,7 @@ await pool.execute(
   }
 }
 
-// ✅ Export both GET and POST handlers
+// Export both GET and POST handlers
 export async function GET(request) {
   return processQueue(request);
 }
