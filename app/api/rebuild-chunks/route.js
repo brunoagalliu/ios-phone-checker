@@ -18,9 +18,9 @@ export async function POST(request) {
     
     const pool = await getConnection();
     
-    // Get all chunks
+    // Get all original chunk data
     const [allChunks] = await pool.execute(
-      `SELECT id, chunk_offset, chunk_data, chunk_status
+      `SELECT chunk_data 
        FROM processing_chunks
        WHERE file_id = ?
        ORDER BY chunk_offset ASC`,
@@ -38,36 +38,34 @@ export async function POST(request) {
     const processedSet = new Set(processedPhones.map(p => p.e164));
     console.log(`   ${processedSet.size} phones already processed`);
     
-    // Clear existing pending/failed chunks
+    // ✅ DELETE ALL CHUNKS (we'll rebuild from scratch)
     await pool.execute(
-      `DELETE FROM processing_chunks 
-       WHERE file_id = ? 
-       AND chunk_status IN ('pending', 'failed', 'processing')`,
+      `DELETE FROM processing_chunks WHERE file_id = ?`,
       [fileId]
     );
     
-    console.log(`   Cleared old pending/failed chunks`);
+    console.log(`   Cleared all old chunks`);
     
-    // Rebuild chunks with only unprocessed phones
-    let newChunks = [];
-    let unprocessedPhones = [];
+    // Collect all phones from all chunks
+    let allPhones = [];
     
     for (const chunk of allChunks) {
-      if (chunk.chunk_status !== 'completed') continue;
-      
-      const phones = JSON.parse(chunk.chunk_data);
-      
-      // Filter out already processed phones
-      const remainingPhones = phones.filter(p => !processedSet.has(p.e164));
-      
-      if (remainingPhones.length > 0) {
-        unprocessedPhones.push(...remainingPhones);
+      try {
+        const phones = JSON.parse(chunk.chunk_data);
+        allPhones.push(...phones);
+      } catch (e) {
+        console.error('Failed to parse chunk:', e);
       }
     }
     
-    console.log(`   Found ${unprocessedPhones.length} unprocessed phones`);
+    console.log(`   Total phones in chunks: ${allPhones.length}`);
     
-    // Create new chunks with unprocessed phones
+    // Filter out already processed phones
+    const unprocessedPhones = allPhones.filter(p => !processedSet.has(p.e164));
+    
+    console.log(`   Unprocessed phones: ${unprocessedPhones.length}`);
+    
+    // Create new chunks with ONLY unprocessed phones
     const CHUNK_SIZE = 500;
     let chunkCount = 0;
     
@@ -79,19 +77,23 @@ export async function POST(request) {
          VALUES (?, ?, ?, 'pending')`,
         [
           fileId,
-          i,
+          i,  // Fresh offset starting from 0
           JSON.stringify(chunkPhones)
         ]
       );
       
       chunkCount++;
+      
+      if (chunkCount % 100 === 0) {
+        console.log(`   Created ${chunkCount} chunks...`);
+      }
     }
     
-    console.log(`✅ Created ${chunkCount} new chunks for unprocessed phones`);
+    console.log(`✅ Created ${chunkCount} new chunks`);
     
     // Update file status
     const [file] = await pool.execute(
-      `SELECT * FROM uploaded_files WHERE id = ?`,
+      `SELECT processing_total FROM uploaded_files WHERE id = ?`,
       [fileId]
     );
     
@@ -107,22 +109,24 @@ export async function POST(request) {
       [alreadyProcessed, alreadyProcessed, total, fileId]
     );
     
-    console.log(`✅ File offset set to ${alreadyProcessed} (${(alreadyProcessed/total*100).toFixed(2)}%)`);
+    console.log(`✅ File offset set to ${alreadyProcessed} / ${total} (${(alreadyProcessed/total*100).toFixed(2)}%)`);
     
     return NextResponse.json({
       success: true,
       fileId: fileId,
       alreadyProcessed: alreadyProcessed,
+      totalPhones: total,
       remaining: unprocessedPhones.length,
       newChunks: chunkCount,
-      progress: (alreadyProcessed / total * 100).toFixed(2)
+      progress: (alreadyProcessed / total * 100).toFixed(2) + '%'
     });
     
   } catch (error) {
     console.error('Rebuild chunks error:', error);
     return NextResponse.json({
       success: false,
-      error: error.message
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     }, { status: 500 });
   }
 }
