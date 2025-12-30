@@ -241,16 +241,27 @@ await pool.execute(
           [chunk.id]
         );
         
-        const newOffset = file.processing_offset + processedCount;
-        const newProgress = ((newOffset / file.processing_total) * 100).toFixed(2);
-        
-        await pool.execute(
-          `UPDATE uploaded_files 
-           SET processing_offset = ?,
-               processing_progress = ?
-           WHERE id = ?`,
-          [newOffset, newProgress, file.id]
-        );
+        // ✅ Update file progress using database-side increment (prevents race conditions)
+console.log(`📊 Incrementing file offset by ${processedCount} phones`);
+
+const [updateResult] = await pool.execute(
+  `UPDATE uploaded_files 
+   SET processing_offset = processing_offset + ?,
+       processing_progress = ROUND((processing_offset + ?) / processing_total * 100, 2)
+   WHERE id = ?`,
+  [processedCount, processedCount, file.id]
+);
+
+console.log(`   Rows affected: ${updateResult.affectedRows}`);
+
+// Get updated values to log
+const [updatedFile] = await pool.execute(
+  `SELECT processing_offset, processing_progress FROM uploaded_files WHERE id = ?`,
+  [file.id]
+);
+
+console.log(`   New offset: ${updatedFile[0].processing_offset} / ${file.processing_total}`);
+console.log(`   New progress: ${updatedFile[0].processing_progress}%`);
         
         totalProcessed += processedCount;
         chunksProcessed++;
