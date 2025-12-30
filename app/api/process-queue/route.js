@@ -129,64 +129,84 @@ async function processQueue(request) {
           // Process non-cached phones in parallel
           if (needApiCall.length > 0) {
             const apiPromises = needApiCall.map(async (phone) => {
-              try {
-                const response = await fetch(
-                  `https://backend.blooio.com/v1/api/contacts/${encodeURIComponent(phone.e164)}/capabilities`,
-                  {
-                    method: 'GET',
-                    headers: {
-                      'Authorization': `Bearer ${process.env.BLOOIO_API_KEY}`
-                    },
-                    signal: AbortSignal.timeout(10000)
-                  }
-                );
+                // Retry logic for timeouts
+                const MAX_RETRIES = 2;
+                let lastError = null;
                 
-                if (!response.ok) {
-                  if (response.status === 429) {
-                    console.warn(`⚠️ Rate limit warning for ${phone.e164}`);
+                for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+                  try {
+                    const response = await fetch(
+                      `https://backend.blooio.com/v1/api/contacts/${encodeURIComponent(phone.e164)}/capabilities`,
+                      {
+                        method: 'GET',
+                        headers: {
+                          'Authorization': `Bearer ${process.env.BLOOIO_API_KEY}`
+                        },
+                        signal: AbortSignal.timeout(20000)  // ✅ 20 seconds (increased from 10)
+                      }
+                    );
+                    
+                    if (!response.ok) {
+                      if (response.status === 429) {
+                        console.warn(`⚠️ Rate limit for ${phone.e164}`);
+                      }
+                      throw new Error(`API ${response.status}`);
+                    }
+                    
+                    const data = await response.json();
+                    const capabilities = data?.capabilities || {};
+                    const supportsIMessage = capabilities.imessage === true;
+                    const supportsSMS = capabilities.sms === true;
+                    
+                    const result = {
+                      phone_number: phone.original,
+                      e164: phone.e164,
+                      is_ios: supportsIMessage ? 1 : 0,
+                      supports_imessage: supportsIMessage ? 1 : 0,
+                      supports_sms: supportsSMS ? 1 : 0,
+                      contact_type: supportsIMessage ? 'iPhone' : (supportsSMS ? 'Android' : 'Unknown'),
+                      error: null,
+                      from_cache: false
+                    };
+                    
+                    // Save to cache
+                    await pool.execute(
+                      `INSERT INTO blooio_cache 
+                       (e164, is_ios, supports_imessage, supports_sms, contact_type)
+                       VALUES (?, ?, ?, ?, ?)
+                       ON DUPLICATE KEY UPDATE
+                       is_ios = VALUES(is_ios),
+                       supports_imessage = VALUES(supports_imessage),
+                       supports_sms = VALUES(supports_sms),
+                       contact_type = VALUES(contact_type)`,
+                      [
+                        phone.e164,
+                        supportsIMessage ? 1 : 0,
+                        supportsIMessage ? 1 : 0,
+                        supportsSMS ? 1 : 0,
+                        result.contact_type
+                      ]
+                    );
+                    
+                    return { success: true, result };
+                    
+                  } catch (error) {
+                    lastError = error;
+                    
+                    // If timeout and not last attempt, retry
+                    if (error.message.includes('timeout') && attempt < MAX_RETRIES - 1) {
+                      console.warn(`⏱️ Timeout for ${phone.e164}, retry ${attempt + 2}/${MAX_RETRIES}`);
+                      await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 sec
+                      continue; // Retry
+                    }
+                    
+                    // Max retries or non-timeout error - give up
+                    break;
                   }
-                  throw new Error(`API ${response.status}`);
                 }
                 
-                const data = await response.json();
-                const capabilities = data?.capabilities || {};
-                const supportsIMessage = capabilities.imessage === true;
-                const supportsSMS = capabilities.sms === true;
-                
-                const result = {
-                  phone_number: phone.original,
-                  e164: phone.e164,
-                  is_ios: supportsIMessage ? 1 : 0,
-                  supports_imessage: supportsIMessage ? 1 : 0,
-                  supports_sms: supportsSMS ? 1 : 0,
-                  contact_type: supportsIMessage ? 'iPhone' : (supportsSMS ? 'Android' : 'Unknown'),
-                  error: null,
-                  from_cache: false
-                };
-                
-                // Save to cache
-                await pool.execute(
-                  `INSERT INTO blooio_cache 
-                   (e164, is_ios, supports_imessage, supports_sms, contact_type)
-                   VALUES (?, ?, ?, ?, ?)
-                   ON DUPLICATE KEY UPDATE
-                   is_ios = VALUES(is_ios),
-                   supports_imessage = VALUES(supports_imessage),
-                   supports_sms = VALUES(supports_sms),
-                   contact_type = VALUES(contact_type)`,
-                  [
-                    phone.e164,
-                    supportsIMessage ? 1 : 0,
-                    supportsIMessage ? 1 : 0,
-                    supportsSMS ? 1 : 0,
-                    result.contact_type
-                  ]
-                );
-                
-                return { success: true, result };
-                
-              } catch (error) {
-                console.error(`Error for ${phone.e164}:`, error.message);
+                // All retries failed
+                console.error(`❌ Failed for ${phone.e164}: ${lastError?.message}`);
                 
                 return {
                   success: true,
@@ -196,13 +216,12 @@ async function processQueue(request) {
                     is_ios: 0,
                     supports_imessage: 0,
                     supports_sms: 0,
-                    contact_type: null,
-                    error: error.message,
+                    contact_type: lastError?.message.includes('timeout') ? 'API_TIMEOUT' : null,
+                    error: lastError?.message || 'Unknown error',
                     from_cache: false
                   }
                 };
-              }
-            });
+              });
             
             const apiResults = await Promise.allSettled(apiPromises);
             
