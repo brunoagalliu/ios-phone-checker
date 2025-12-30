@@ -84,32 +84,58 @@ async function processQueue(request) {
         let apiCalls = 0;
         
         for (const phone of phoneData) {
-          if (Date.now() - startTime > MAX_PROCESSING_TIME) {
-            console.log(`⚠️ Timeout - processed ${processedCount}/${phoneData.length}`);
-            break;
-          }
-          
-          const [cachedRows] = await pool.execute(
-            `SELECT * FROM blooio_cache WHERE e164 = ? LIMIT 1`,  // ✅ Use e164 column
-            [phone.e164]
-          );
-          
-          if (cachedRows.length > 0) {
-            const cached = cachedRows[0];
-            results.push({
-              phone_number: phone.original,
-              e164: phone.e164,
-              is_ios: cached.is_ios || 0,
-              supports_imessage: cached.supports_imessage || 0,
-              supports_sms: cached.supports_sms || 0,
-              contact_type: cached.contact_type || null,
-              error: cached.error || null,
-              from_cache: true
-            });
-            processedCount++;
-            cacheHits++;
-            continue;
-          }
+            if (Date.now() - startTime > MAX_PROCESSING_TIME) {
+              console.log(`⚠️ Timeout - processed ${processedCount}/${phoneData.length}`);
+              break;
+            }
+            
+            // ✅ Add detailed logging
+            if (processedCount % 10 === 0) {
+              console.log(`\n📞 Phone ${processedCount + 1}/${phoneData.length}: ${phone.e164}`);
+            }
+            
+            // Check cache first
+            const [cachedRows] = await pool.execute(
+              `SELECT * FROM blooio_cache WHERE e164 = ? LIMIT 1`,
+              [phone.e164]
+            );
+            
+            // ✅ Log first few cache attempts
+            if (processedCount < 5) {
+              console.log(`   🔍 Cache lookup for: "${phone.e164}"`);
+              console.log(`   📊 Result: ${cachedRows.length} rows`);
+              if (cachedRows.length > 0) {
+                console.log(`   ✅ CACHE HIT!`, cachedRows[0]);
+              } else {
+                console.log(`   ❌ CACHE MISS - will call API`);
+                
+                // Check if it exists with different format
+                const [testRows] = await pool.execute(
+                  `SELECT e164 FROM blooio_cache WHERE e164 LIKE ? LIMIT 1`,
+                  [`%${phone.e164.slice(-10)}%`]
+                );
+                if (testRows.length > 0) {
+                  console.log(`   ⚠️ Found similar in cache: "${testRows[0].e164}"`);
+                }
+              }
+            }
+            
+            if (cachedRows.length > 0) {
+              const cached = cachedRows[0];
+              results.push({
+                phone_number: phone.original,
+                e164: phone.e164,
+                is_ios: cached.is_ios || 0,
+                supports_imessage: cached.supports_imessage || 0,
+                supports_sms: cached.supports_sms || 0,
+                contact_type: cached.contact_type || null,
+                error: cached.error || null,
+                from_cache: true
+              });
+              processedCount++;
+              cacheHits++;
+              continue;
+            }
           
           // Not in cache - call Blooio API
 try {
