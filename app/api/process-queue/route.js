@@ -219,55 +219,64 @@ await pool.execute(
     processedCount++;
   }
         }
-        
+        // Save results
         if (results.length > 0) {
-          console.log(`--- Saving ${results.length} results ---`);
+            console.log(`--- Saving ${results.length} results ---`);
+            
+            try {
+              const values = results.map(r => 
+                `(${file.id}, ${pool.escape(r.phone_number)}, ${pool.escape(r.e164)}, ${r.is_ios}, ${r.supports_imessage}, ${r.supports_sms}, ${pool.escape(r.contact_type)}, ${pool.escape(r.error)}, ${r.from_cache ? 1 : 0})`
+              ).join(',');
+              
+              await pool.execute(
+                `INSERT INTO blooio_results 
+                 (file_id, phone_number, e164, is_ios, supports_imessage, supports_sms, contact_type, error, from_cache)
+                 VALUES ${values}`
+              );
+              
+              console.log(`✅ Saved ${results.length} results to database`);
+              
+            } catch (saveError) {
+              console.error('❌ Failed to save results:', saveError);
+              throw saveError;
+            }
+          }
           
-          const values = results.map(r => 
-            `(${file.id}, ${pool.escape(r.phone_number)}, ${pool.escape(r.e164)}, ${r.is_ios}, ${r.supports_imessage}, ${r.supports_sms}, ${pool.escape(r.contact_type)}, ${pool.escape(r.error)}, ${r.from_cache ? 1 : 0})`
-          ).join(',');
+          // Mark chunk as completed
+          await pool.execute(
+            `UPDATE processing_chunks 
+             SET chunk_status = 'completed'
+             WHERE id = ?`,
+            [chunk.id]
+          );
+          
+          console.log(`✅ Marked chunk ${chunk.id} as completed`);
+          
+          // ✅ UPDATE FILE PROGRESS - Use database-side increment
+          console.log(`📊 Updating file progress: +${processedCount} phones`);
           
           await pool.execute(
-            `INSERT INTO blooio_results 
-             (file_id, phone_number, e164, is_ios, supports_imessage, supports_sms, contact_type, error, from_cache)
-             VALUES ${values}`
+            `UPDATE uploaded_files 
+             SET processing_offset = processing_offset + ?,
+                 processing_progress = ROUND((processing_offset + ?) / processing_total * 100, 2)
+             WHERE id = ?`,
+            [processedCount, processedCount, file.id]
           );
-        }
-        
-        await pool.execute(
-          `UPDATE processing_chunks 
-           SET chunk_status = 'completed'
-           WHERE id = ?`,
-          [chunk.id]
-        );
-        
-        // ✅ Update file progress using database-side increment (prevents race conditions)
-console.log(`📊 Incrementing file offset by ${processedCount} phones`);
-
-const [updateResult] = await pool.execute(
-  `UPDATE uploaded_files 
-   SET processing_offset = processing_offset + ?,
-       processing_progress = ROUND((processing_offset + ?) / processing_total * 100, 2)
-   WHERE id = ?`,
-  [processedCount, processedCount, file.id]
-);
-
-console.log(`   Rows affected: ${updateResult.affectedRows}`);
-
-// Get updated values to log
-const [updatedFile] = await pool.execute(
-  `SELECT processing_offset, processing_progress FROM uploaded_files WHERE id = ?`,
-  [file.id]
-);
-
-console.log(`   New offset: ${updatedFile[0].processing_offset} / ${file.processing_total}`);
-console.log(`   New progress: ${updatedFile[0].processing_progress}%`);
-        
-        totalProcessed += processedCount;
-        chunksProcessed++;
-        
-        console.log(`✅ Chunk completed: ${newOffset}/${file.processing_total} (${newProgress}%)`);
-        console.log(`   Cache hits: ${cacheHits}, API calls: ${apiCalls}`);
+          
+          // Verify the update worked
+          const [verifyFile] = await pool.execute(
+            `SELECT processing_offset, processing_progress FROM uploaded_files WHERE id = ?`,
+            [file.id]
+          );
+          
+          console.log(`   New offset: ${verifyFile[0].processing_offset} / ${file.processing_total}`);
+          console.log(`   New progress: ${verifyFile[0].processing_progress}%`);
+          
+          totalProcessed += processedCount;
+          chunksProcessed++;
+          
+          console.log(`✅ Chunk completed: ${verifyFile[0].processing_offset}/${file.processing_total} (${verifyFile[0].processing_progress}%)`);
+          console.log(`   Cache hits: ${cacheHits}, API calls: ${apiCalls}`);
         
       } catch (chunkError) {
         console.error('Chunk processing error:', chunkError);
