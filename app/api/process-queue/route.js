@@ -82,168 +82,145 @@ async function processQueue(request) {
         let cacheHits = 0;
         let apiCalls = 0;
         
-        // ✅ Optimized for 3 req/sec - 6 phones per batch, 2 second delay
-        const BATCH_SIZE = 6;
-        const DELAY_BETWEEN_BATCHES = 2000;
+        // ✅ Sequential processing with proper rate limiting (3 req/sec)
+        const DELAY_BETWEEN_API_CALLS = 350; // 350ms = ~2.9 req/sec
         
-        for (let batchStart = 0; batchStart < phoneData.length; batchStart += BATCH_SIZE) {
+        for (let i = 0; i < phoneData.length; i++) {
           if (Date.now() - startTime > MAX_PROCESSING_TIME) {
             console.log(`⚠️ Timeout - processed ${processedCount}/${phoneData.length}`);
             break;
           }
           
-          const batch = phoneData.slice(batchStart, batchStart + BATCH_SIZE);
+          const phone = phoneData[i];
           
-          // Check cache for entire batch first (instant, no API delay)
-          const cachedResults = [];
-          const needApiCall = [];
+          // Check cache first (instant, no delay needed)
+          const [cachedRows] = await pool.execute(
+            `SELECT * FROM blooio_cache WHERE e164 = ? LIMIT 1`,
+            [phone.e164]
+          );
           
-          for (const phone of batch) {
-            const [cachedRows] = await pool.execute(
-              `SELECT * FROM blooio_cache WHERE e164 = ? LIMIT 1`,
-              [phone.e164]
-            );
-            
-            if (cachedRows.length > 0) {
-              const cached = cachedRows[0];
-              cachedResults.push({
+          if (cachedRows.length > 0) {
+            const cached = cachedRows[0];
+            results.push({
+              phone_number: phone.original,
+              e164: phone.e164,
+              is_ios: cached.is_ios || 0,
+              supports_imessage: cached.supports_imessage || 0,
+              supports_sms: cached.supports_sms || 0,
+              contact_type: cached.contact_type || null,
+              error: cached.error || null,
+              from_cache: true
+            });
+            processedCount++;
+            cacheHits++;
+            continue; // Skip API call delay for cached phones
+          }
+          
+          // Not in cache - call API with retry logic
+          let success = false;
+          let lastError = null;
+          const MAX_RETRIES = 2;
+          
+          for (let attempt = 0; attempt < MAX_RETRIES && !success; attempt++) {
+            try {
+              const response = await fetch(
+                `https://backend.blooio.com/v1/api/contacts/${encodeURIComponent(phone.e164)}/capabilities`,
+                {
+                  method: 'GET',
+                  headers: {
+                    'Authorization': `Bearer ${process.env.BLOOIO_API_KEY}`
+                  },
+                  signal: AbortSignal.timeout(15000) // 15 seconds
+                }
+              );
+              
+              if (!response.ok) {
+                if (response.status === 429) {
+                  console.warn(`⚠️ Rate limit hit for ${phone.e164}`);
+                  // If rate limited, wait longer before retry
+                  await new Promise(resolve => setTimeout(resolve, 5000));
+                  continue; // Retry
+                }
+                throw new Error(`API ${response.status}`);
+              }
+              
+              const data = await response.json();
+              const capabilities = data?.capabilities || {};
+              const supportsIMessage = capabilities.imessage === true;
+              const supportsSMS = capabilities.sms === true;
+              
+              const result = {
                 phone_number: phone.original,
                 e164: phone.e164,
-                is_ios: cached.is_ios || 0,
-                supports_imessage: cached.supports_imessage || 0,
-                supports_sms: cached.supports_sms || 0,
-                contact_type: cached.contact_type || null,
-                error: cached.error || null,
-                from_cache: true
-              });
-              cacheHits++;
-            } else {
-              needApiCall.push(phone);
-            }
-          }
-          
-          // Add cached results
-          results.push(...cachedResults);
-          processedCount += cachedResults.length;
-          
-          // Process non-cached phones in parallel
-          if (needApiCall.length > 0) {
-            const apiPromises = needApiCall.map(async (phone) => {
-                // Retry logic for timeouts
-                const MAX_RETRIES = 2;
-                let lastError = null;
-                
-                for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-                  try {
-                    const response = await fetch(
-                      `https://backend.blooio.com/v1/api/contacts/${encodeURIComponent(phone.e164)}/capabilities`,
-                      {
-                        method: 'GET',
-                        headers: {
-                          'Authorization': `Bearer ${process.env.BLOOIO_API_KEY}`
-                        },
-                        signal: AbortSignal.timeout(20000)  // ✅ 20 seconds (increased from 10)
-                      }
-                    );
-                    
-                    if (!response.ok) {
-                      if (response.status === 429) {
-                        console.warn(`⚠️ Rate limit for ${phone.e164}`);
-                      }
-                      throw new Error(`API ${response.status}`);
-                    }
-                    
-                    const data = await response.json();
-                    const capabilities = data?.capabilities || {};
-                    const supportsIMessage = capabilities.imessage === true;
-                    const supportsSMS = capabilities.sms === true;
-                    
-                    const result = {
-                      phone_number: phone.original,
-                      e164: phone.e164,
-                      is_ios: supportsIMessage ? 1 : 0,
-                      supports_imessage: supportsIMessage ? 1 : 0,
-                      supports_sms: supportsSMS ? 1 : 0,
-                      contact_type: supportsIMessage ? 'iPhone' : (supportsSMS ? 'Android' : 'Unknown'),
-                      error: null,
-                      from_cache: false
-                    };
-                    
-                    // Save to cache
-                    await pool.execute(
-                      `INSERT INTO blooio_cache 
-                       (e164, is_ios, supports_imessage, supports_sms, contact_type)
-                       VALUES (?, ?, ?, ?, ?)
-                       ON DUPLICATE KEY UPDATE
-                       is_ios = VALUES(is_ios),
-                       supports_imessage = VALUES(supports_imessage),
-                       supports_sms = VALUES(supports_sms),
-                       contact_type = VALUES(contact_type)`,
-                      [
-                        phone.e164,
-                        supportsIMessage ? 1 : 0,
-                        supportsIMessage ? 1 : 0,
-                        supportsSMS ? 1 : 0,
-                        result.contact_type
-                      ]
-                    );
-                    
-                    return { success: true, result };
-                    
-                  } catch (error) {
-                    lastError = error;
-                    
-                    // If timeout and not last attempt, retry
-                    if (error.message.includes('timeout') && attempt < MAX_RETRIES - 1) {
-                      console.warn(`⏱️ Timeout for ${phone.e164}, retry ${attempt + 2}/${MAX_RETRIES}`);
-                      await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 sec
-                      continue; // Retry
-                    }
-                    
-                    // Max retries or non-timeout error - give up
-                    break;
-                  }
-                }
-                
-                // All retries failed
-                console.error(`❌ Failed for ${phone.e164}: ${lastError?.message}`);
-                
-                return {
-                  success: true,
-                  result: {
-                    phone_number: phone.original,
-                    e164: phone.e164,
-                    is_ios: 0,
-                    supports_imessage: 0,
-                    supports_sms: 0,
-                    contact_type: lastError?.message.includes('timeout') ? 'API_TIMEOUT' : null,
-                    error: lastError?.message || 'Unknown error',
-                    from_cache: false
-                  }
-                };
-              });
-            
-            const apiResults = await Promise.allSettled(apiPromises);
-            
-            apiResults.forEach(promiseResult => {
-              if (promiseResult.status === 'fulfilled' && promiseResult.value.success) {
-                results.push(promiseResult.value.result);
-                processedCount++;
-                apiCalls++;
-              } else {
-                console.error('API promise failed:', promiseResult.reason);
-                processedCount++;
+                is_ios: supportsIMessage ? 1 : 0,
+                supports_imessage: supportsIMessage ? 1 : 0,
+                supports_sms: supportsSMS ? 1 : 0,
+                contact_type: supportsIMessage ? 'iPhone' : (supportsSMS ? 'Android' : 'Unknown'),
+                error: null,
+                from_cache: false
+              };
+              
+              results.push(result);
+              
+              // Save to cache
+              await pool.execute(
+                `INSERT INTO blooio_cache 
+                 (e164, is_ios, supports_imessage, supports_sms, contact_type)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE
+                 is_ios = VALUES(is_ios),
+                 supports_imessage = VALUES(supports_imessage),
+                 supports_sms = VALUES(supports_sms),
+                 contact_type = VALUES(contact_type)`,
+                [
+                  phone.e164,
+                  supportsIMessage ? 1 : 0,
+                  supportsIMessage ? 1 : 0,
+                  supportsSMS ? 1 : 0,
+                  result.contact_type
+                ]
+              );
+              
+              success = true;
+              apiCalls++;
+              
+              // ✅ Rate limiting: Wait 350ms before next API call
+              await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_API_CALLS));
+              
+            } catch (error) {
+              lastError = error;
+              
+              if (error.message.includes('timeout') && attempt < MAX_RETRIES - 1) {
+                console.warn(`⏱️ Timeout for ${phone.e164}, retry ${attempt + 2}/${MAX_RETRIES}`);
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                continue; // Retry
               }
-            });
-            
-            // Rate limiting: Wait 2 seconds between batches that made API calls
-            if (batchStart + BATCH_SIZE < phoneData.length) {
-              await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_BATCHES));
+              
+              break; // Give up after retries
             }
           }
           
-          // Log progress every 30 phones
-          if (processedCount % 30 === 0 || processedCount === phoneData.length) {
+          if (!success) {
+            // All retries failed
+            console.error(`❌ Failed for ${phone.e164}: ${lastError?.message}`);
+            
+            results.push({
+              phone_number: phone.original,
+              e164: phone.e164,
+              is_ios: 0,
+              supports_imessage: 0,
+              supports_sms: 0,
+              contact_type: lastError?.message.includes('timeout') ? 'API_TIMEOUT' : null,
+              error: lastError?.message || 'Unknown error',
+              from_cache: false
+            });
+            apiCalls++;
+          }
+          
+          processedCount++;
+          
+          // Log progress every 50 phones
+          if (processedCount % 50 === 0 || processedCount === phoneData.length) {
             console.log(`   📊 ${processedCount}/${phoneData.length} phones | Cache: ${cacheHits} | API: ${apiCalls}`);
           }
         }
