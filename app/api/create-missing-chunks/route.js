@@ -1,5 +1,9 @@
 import { NextResponse } from 'next/server';
 import { getConnection } from '../../../lib/db.js';
+import fs from 'fs';
+import path from 'path';
+import { parse } from 'csv-parse/sync';
+import { parsePhoneNumber } from 'libphonenumber-js';
 
 export const maxDuration = 60;
 
@@ -11,7 +15,7 @@ export async function POST(request) {
       return NextResponse.json({ success: false, error: 'fileId required' }, { status: 400 });
     }
     
-    console.log(`🔧 Creating missing chunks for file ${fileId}...`);
+    console.log(`🔧 Creating chunks from CSV for file ${fileId}...`);
     
     const pool = await getConnection();
     
@@ -26,10 +30,8 @@ export async function POST(request) {
     }
     
     const file = files[0];
-    console.log(`   File total: ${file.processing_total} phones`);
-    console.log(`   File offset: ${file.processing_offset} phones`);
     
-    // Get all processed phone numbers
+    // Get processed phones
     const [processedPhones] = await pool.execute(
       `SELECT DISTINCT e164 FROM blooio_results WHERE file_id = ?`,
       [fileId]
@@ -38,71 +40,84 @@ export async function POST(request) {
     const processedSet = new Set(processedPhones.map(p => p.e164));
     console.log(`   Already processed: ${processedSet.size} phones`);
     
-    // Get all existing chunks
-    const [allChunks] = await pool.execute(
-      `SELECT chunk_data FROM processing_chunks WHERE file_id = ? ORDER BY chunk_offset ASC`,
-      [fileId]
-    );
+    // Load CSV
+    const uploadsDir = path.join(process.cwd(), 'uploads');
+    const filePath = path.join(uploadsDir, file.file_name);
     
-    console.log(`   Existing chunks: ${allChunks.length}`);
+    if (!fs.existsSync(filePath)) {
+      return NextResponse.json({ 
+        success: false, 
+        error: `CSV file not found at ${filePath}` 
+      }, { status: 404 });
+    }
     
-    // Extract all phones from all chunks
+    const fileContent = fs.readFileSync(filePath, 'utf-8');
+    const records = parse(fileContent, {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true
+    });
+    
+    console.log(`   Total records in CSV: ${records.length}`);
+    
+    // Parse all phones from CSV
     const allPhones = [];
+    const seenE164 = new Set();
     
-    for (const chunk of allChunks) {
+    for (const record of records) {
+      const phoneColumn = Object.keys(record)[0];
+      const rawPhone = record[phoneColumn];
+      
+      if (!rawPhone) continue;
+      
       try {
-        const phones = JSON.parse(chunk.chunk_data);
-        allPhones.push(...phones);
-      } catch (e) {
-        console.error('Failed to parse chunk:', e);
+        const parsed = parsePhoneNumber(rawPhone, 'US');
+        if (parsed && parsed.isValid()) {
+          const e164 = parsed.format('E.164');
+          
+          // Deduplicate within CSV
+          if (!seenE164.has(e164)) {
+            seenE164.add(e164);
+            allPhones.push({
+              original: rawPhone,
+              e164: e164
+            });
+          }
+        }
+      } catch (error) {
+        // Skip invalid phones
       }
     }
     
-    console.log(`   Total phones in chunks: ${allPhones.length}`);
+    console.log(`   Unique valid phones in CSV: ${allPhones.length}`);
     
     // Find unprocessed phones
-    const unprocessedPhones = allPhones.filter(phone => !processedSet.has(phone.e164));
+    const unprocessedPhones = allPhones.filter(p => !processedSet.has(p.e164));
     
     console.log(`   Unprocessed phones: ${unprocessedPhones.length}`);
     
     if (unprocessedPhones.length === 0) {
-      console.log('✅ No unprocessed phones found - all caught up!');
-      
-      // Check if we need to mark file as complete
-      if (file.processing_offset >= file.processing_total) {
-        await pool.execute(
-          `UPDATE uploaded_files 
-           SET processing_status = 'completed',
-               processing_progress = 100
-           WHERE id = ?`,
-          [fileId]
-        );
-        console.log('✅ File marked as completed');
-      }
+      // Mark file as complete
+      await pool.execute(
+        `UPDATE uploaded_files 
+         SET processing_status = 'completed',
+             processing_progress = 100
+         WHERE id = ?`,
+        [fileId]
+      );
       
       return NextResponse.json({
         success: true,
-        message: 'No missing phones - all processed',
-        totalPhones: allPhones.length,
+        message: 'All phones processed!',
+        totalInCSV: allPhones.length,
         processed: processedSet.size,
         unprocessed: 0
       });
     }
     
-    // Delete old pending chunks (we'll recreate them properly)
-    await pool.execute(
-      `DELETE FROM processing_chunks 
-       WHERE file_id = ? 
-       AND chunk_status = 'pending'`,
-      [fileId]
-    );
-    
-    console.log('   Cleared old pending chunks');
-    
-    // Create new chunks for unprocessed phones
+    // Create chunks
     const CHUNK_SIZE = 500;
     let chunkCount = 0;
-    const startingOffset = 500000; // High offset to avoid conflicts
     
     for (let i = 0; i < unprocessedPhones.length; i += CHUNK_SIZE) {
       const chunkPhones = unprocessedPhones.slice(i, i + CHUNK_SIZE);
@@ -112,35 +127,37 @@ export async function POST(request) {
          VALUES (?, ?, ?, 'pending')`,
         [
           fileId,
-          startingOffset + i,
+          i, // Clean sequential offset
           JSON.stringify(chunkPhones)
         ]
       );
       
       chunkCount++;
-      
-      if (chunkCount % 50 === 0) {
-        console.log(`   Created ${chunkCount} chunks...`);
-      }
     }
     
-    console.log(`✅ Created ${chunkCount} new chunks for ${unprocessedPhones.length} unprocessed phones`);
+    console.log(`✅ Created ${chunkCount} chunks for ${unprocessedPhones.length} unprocessed phones`);
+    
+    // Resume processing
+    await pool.execute(
+      `UPDATE uploaded_files 
+       SET processing_status = 'processing'
+       WHERE id = ?`,
+      [fileId]
+    );
     
     return NextResponse.json({
       success: true,
-      fileId: fileId,
-      totalPhonesInChunks: allPhones.length,
+      totalInCSV: allPhones.length,
       alreadyProcessed: processedSet.size,
       unprocessed: unprocessedPhones.length,
       chunksCreated: chunkCount
     });
     
   } catch (error) {
-    console.error('Create missing chunks error:', error);
+    console.error('Error:', error);
     return NextResponse.json({
       success: false,
-      error: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      error: error.message
     }, { status: 500 });
   }
 }
