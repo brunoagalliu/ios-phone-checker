@@ -177,9 +177,23 @@ if (processedCount < 10) {
                 throw new Error('Missing capabilities in response');
               }
               
-              const capabilities = data.capabilities;
-              const supportsIMessage = capabilities.imessage === true;
-              const supportsSMS = capabilities.sms === true;
+              const capabilities = data.capabilities || {};
+
+            // ✅ Handle both v1 and v2, case-insensitive
+            const supportsIMessage = 
+            capabilities.imessage === true || 
+            capabilities.iMessage === true ||
+            capabilities.imessage === "true" ||
+            capabilities.iMessage === "true";
+
+            const supportsSMS = 
+            capabilities.sms === true || 
+            capabilities.SMS === true ||
+            capabilities.sms === "true" ||
+            capabilities.SMS === "true";
+
+            // 🔍 Debug log
+            console.log(`📱 ${phone.e164}: iMessage=${supportsIMessage}, SMS=${supportsSMS}, raw=${JSON.stringify(capabilities)}`);
               
               // ✅ Log suspicious responses
               if (!supportsIMessage && !supportsSMS) {
