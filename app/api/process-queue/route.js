@@ -256,31 +256,43 @@ async function processQueue(request) {
           console.log(`✅ Chunk ${chunk.id} fully completed (${processedCount}/${phoneData.length})`);
           
         } else {
-          // Partial completion - create new chunk with remaining phones
-          const remainingPhones = phoneData.slice(processedCount);
-          
-          console.log(`⚠️ Chunk partially completed: ${processedCount}/${phoneData.length}`);
-          console.log(`   Creating new chunk with ${remainingPhones.length} remaining phones`);
-          
-          await pool.execute(
-            `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
-             VALUES (?, ?, ?, 'pending')`,
-            [
-              file.id,
-              chunk.chunk_offset + processedCount,
-              JSON.stringify(remainingPhones)
-            ]
-          );
-          
-          await pool.execute(
-            `UPDATE processing_chunks 
-             SET chunk_status = 'completed'
-             WHERE id = ?`,
-            [chunk.id]
-          );
-          
-          console.log(`✅ Original chunk marked complete, new chunk created at offset ${chunk.chunk_offset + processedCount}`);
-        }
+            // Partial completion - create new chunk with remaining phones
+            const remainingPhones = phoneData.slice(processedCount);
+            
+            console.log(`⚠️ Chunk partially completed: ${processedCount}/${phoneData.length}`);
+            console.log(`   Creating new chunk with ${remainingPhones.length} remaining phones`);
+            
+            // ✅ Check if we've already hit the file total
+            const [fileCheck] = await pool.execute(
+              `SELECT processing_offset, processing_total FROM uploaded_files WHERE id = ?`,
+              [file.id]
+            );
+            
+            // ✅ Only create new chunk if we haven't exceeded the file total
+            if (fileCheck[0].processing_offset + remainingPhones.length <= fileCheck[0].processing_total) {
+              await pool.execute(
+                `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
+                 VALUES (?, ?, ?, 'pending')`,
+                [
+                  file.id,
+                  chunk.chunk_offset + processedCount,
+                  JSON.stringify(remainingPhones)
+                ]
+              );
+              
+              console.log(`✅ New chunk created at offset ${chunk.chunk_offset + processedCount}`);
+            } else {
+              console.log(`⚠️ Skipping new chunk - would exceed file total`);
+            }
+            
+            // Mark original chunk as completed
+            await pool.execute(
+              `UPDATE processing_chunks 
+               SET chunk_status = 'completed'
+               WHERE id = ?`,
+              [chunk.id]
+            );
+          }
         
         // Update file progress by actual processed count
         await pool.execute(
