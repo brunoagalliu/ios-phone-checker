@@ -152,6 +152,15 @@ async function processQueue(request) {
               }
               
               const data = await response.json();
+
+              // ✅ Temporary debug logging
+if (processedCount < 10) {
+    console.log(`\n🔍 DEBUG - Phone ${phone.e164}:`);
+    console.log('   Raw Response:', JSON.stringify(data, null, 2));
+    console.log('   Capabilities:', data.capabilities);
+    console.log('   iMessage:', data.capabilities?.imessage);
+    console.log('   SMS:', data.capabilities?.sms);
+  }
               
               // ✅ Validate response structure
               if (!data || typeof data !== 'object') {
