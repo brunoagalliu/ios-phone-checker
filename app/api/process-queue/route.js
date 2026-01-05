@@ -323,24 +323,36 @@ async function processQueue(request) {
     }
     
     // Check if file is complete
-    const [updatedFile] = await pool.execute(
-      `SELECT * FROM uploaded_files WHERE id = ?`,
+const [updatedFile] = await pool.execute(
+    `SELECT * FROM uploaded_files WHERE id = ?`,
+    [file.id]
+  );
+  
+  const currentFile = updatedFile[0];
+  
+  // ✅ Check if there are any pending chunks left
+  const [pendingChunks] = await pool.execute(
+    `SELECT COUNT(*) as pending_count 
+     FROM processing_chunks 
+     WHERE file_id = ? 
+     AND chunk_status IN ('pending', 'processing')`,
+    [file.id]
+  );
+  
+  // ✅ Only mark complete if offset reached AND no pending chunks
+  if (currentFile.processing_offset >= currentFile.processing_total && pendingChunks[0].pending_count === 0) {
+    console.log(`\n🎉 FILE ${file.id} COMPLETED!`);
+    
+    await pool.execute(
+      `UPDATE uploaded_files 
+       SET processing_status = 'completed',
+           processing_progress = 100
+       WHERE id = ?`,
       [file.id]
     );
-    
-    const currentFile = updatedFile[0];
-    
-    if (currentFile.processing_offset >= currentFile.processing_total) {
-      console.log(`\n🎉 FILE ${file.id} COMPLETED!`);
-      
-      await pool.execute(
-        `UPDATE uploaded_files 
-         SET processing_status = 'completed',
-             processing_progress = 100
-         WHERE id = ?`,
-        [file.id]
-      );
-    }
+  } else if (pendingChunks[0].pending_count > 0) {
+    console.log(`\n⚠️ File offset reached total, but ${pendingChunks[0].pending_count} chunks still pending`);
+  }
     
     const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`\n✓ Processed ${totalProcessed} phones in ${chunksProcessed} chunks`);
