@@ -5,17 +5,27 @@ export async function GET(request) {
     const { searchParams } = new URL(request.url);
     const phone = searchParams.get('phone') || '+12012341824';
     
-    console.log(`Testing Blooio API for: ${phone}`);
+    // Ensure proper E.164 format
+    let formattedPhone = phone;
+    if (!phone.startsWith('+')) {
+      formattedPhone = '+' + phone;
+    }
     
-    const response = await fetch(
-      `https://backend.blooio.com/v1/api/contacts/${encodeURIComponent(phone)}/capabilities`,
-      {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${process.env.BLOOIO_API_KEY}`
-        }
+    const apiUrl = `https://backend.blooio.com/v1/api/contacts/${encodeURIComponent(formattedPhone)}/capabilities`;
+    
+    console.log(`Testing Blooio API`);
+    console.log(`Phone: ${formattedPhone}`);
+    console.log(`URL: ${apiUrl}`);
+    
+    const response = await fetch(apiUrl, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${process.env.BLOOIO_API_KEY}`,
+        'Content-Type': 'application/json'
       }
-    );
+    });
+    
+    console.log(`Status: ${response.status}`);
     
     const responseText = await response.text();
     console.log('Raw response:', responseText);
@@ -28,7 +38,21 @@ export async function GET(request) {
         success: false,
         error: 'Failed to parse JSON',
         rawResponse: responseText,
-        status: response.status
+        status: response.status,
+        url: apiUrl
+      });
+    }
+    
+    // If error response
+    if (data.error || data.message || response.status >= 400) {
+      return NextResponse.json({
+        success: false,
+        phone: formattedPhone,
+        url: apiUrl,
+        status: response.status,
+        error: data.error || 'API Error',
+        message: data.message || data.error || 'Unknown error',
+        rawResponse: data
       });
     }
     
@@ -38,7 +62,9 @@ export async function GET(request) {
     
     return NextResponse.json({
       success: true,
-      phone: phone,
+      phone: formattedPhone,
+      url: apiUrl,
+      status: response.status,
       rawResponse: data,
       parsed: {
         supportsIMessage: supportsIMessage,
@@ -50,7 +76,8 @@ export async function GET(request) {
   } catch (error) {
     return NextResponse.json({
       success: false,
-      error: error.message
+      error: error.message,
+      stack: error.stack
     }, { status: 500 });
   }
 }
