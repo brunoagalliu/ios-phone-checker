@@ -1,36 +1,56 @@
 import { NextResponse } from 'next/server';
-import { checkBlooioSingle } from '../../../lib/blooioClient.js';
 
-export const maxDuration = 10;
-
-export async function POST(request) {
+export async function GET(request) {
   try {
-    const { phoneNumber } = await request.json();
+    const { searchParams } = new URL(request.url);
+    const phone = searchParams.get('phone') || '+12012341824';
     
-    if (!phoneNumber) {
-      return NextResponse.json({ error: 'Phone number required' }, { status: 400 });
+    console.log(`Testing Blooio API for: ${phone}`);
+    
+    const response = await fetch(
+      `https://backend.blooio.com/v1/api/contacts/${encodeURIComponent(phone)}/capabilities`,
+      {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${process.env.BLOOIO_API_KEY}`
+        }
+      }
+    );
+    
+    const responseText = await response.text();
+    console.log('Raw response:', responseText);
+    
+    let data;
+    try {
+      data = JSON.parse(responseText);
+    } catch (e) {
+      return NextResponse.json({
+        success: false,
+        error: 'Failed to parse JSON',
+        rawResponse: responseText,
+        status: response.status
+      });
     }
     
-    console.log(`\n=== TESTING BLOOIO API ===`);
-    console.log(`Phone: ${phoneNumber}`);
-    
-    const result = await checkBlooioSingle(phoneNumber);
-    
-    console.log('Result:', JSON.stringify(result, null, 2));
+    const capabilities = data?.capabilities || {};
+    const supportsIMessage = capabilities.imessage === true;
+    const supportsSMS = capabilities.sms === true;
     
     return NextResponse.json({
       success: true,
-      phoneNumber: phoneNumber,
-      apiResponse: result,
-      timestamp: new Date().toISOString()
+      phone: phone,
+      rawResponse: data,
+      parsed: {
+        supportsIMessage: supportsIMessage,
+        supportsSMS: supportsSMS,
+        contactType: supportsIMessage ? 'iPhone' : (supportsSMS ? 'Android' : 'Unknown')
+      }
     });
     
   } catch (error) {
-    console.error('Test error:', error);
     return NextResponse.json({
       success: false,
-      error: error.message,
-      stack: error.stack
+      error: error.message
     }, { status: 500 });
   }
 }
