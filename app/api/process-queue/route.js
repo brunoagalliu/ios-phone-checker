@@ -116,163 +116,194 @@ async function processQueue(request) {
             continue; // Skip API call delay for cached phones
           }
           
+
+
+
+
+
+
+
           // Not in cache - call API with retry logic
-          let success = false;
-          let lastError = null;
-          const MAX_RETRIES = 3; // ✅ Increased from 2
-          
-          for (let attempt = 0; attempt < MAX_RETRIES && !success; attempt++) {
-            try {
-              const response = await fetch(
-                `https://backend.blooio.com/v2/api/contacts/${encodeURIComponent(phone.e164)}/capabilities`,
-                {
-                  method: 'GET',
-                  headers: {
-                    'Authorization': `Bearer ${process.env.BLOOIO_API_KEY}`
-                  },
-                  signal: AbortSignal.timeout(15000) // 15 seconds
-                }
-              );
-              
-              if (!response.ok) {
-                if (response.status === 429) {
-                  console.warn(`⚠️ Rate limit hit for ${phone.e164} - waiting 5s`);
-                  await new Promise(resolve => setTimeout(resolve, 5000));
-                  continue; // Retry
-                }
-                
-                // ✅ Retry on server errors (5xx)
-                if (response.status >= 500 && attempt < MAX_RETRIES - 1) {
-                  console.warn(`⚠️ Server error ${response.status} for ${phone.e164}, retry ${attempt + 2}/${MAX_RETRIES}`);
-                  await new Promise(resolve => setTimeout(resolve, 2000));
-                  continue; // Retry
-                }
-                
-                throw new Error(`API ${response.status}`);
-              }
-              
-              const data = await response.json();
+let success = false;
+let lastError = null;
+const MAX_RETRIES = 3;
 
-              // ✅ Temporary debug logging
-if (processedCount < 10) {
-    console.log(`\n🔍 DEBUG - Phone ${phone.e164}:`);
-    console.log('   Raw Response:', JSON.stringify(data, null, 2));
-    console.log('   Capabilities:', data.capabilities);
-    console.log('   iMessage:', data.capabilities?.imessage);
-    console.log('   SMS:', data.capabilities?.sms);
+for (let attempt = 0; attempt < MAX_RETRIES && !success; attempt++) {
+  try {
+    console.log(`🔵 Calling Blooio for ${phone.e164} (attempt ${attempt + 1})`);
+    
+    const response = await fetch(
+      `https://backend.blooio.com/v2/api/contacts/${encodeURIComponent(phone.e164)}/capabilities`,
+      {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${process.env.BLOOIO_API_KEY}`
+        },
+        signal: AbortSignal.timeout(15000)
+      }
+    );
+    
+    console.log(`   Response status: ${response.status}`);
+    
+    if (!response.ok) {
+      if (response.status === 429) {
+        console.warn(`⚠️ Rate limit hit for ${phone.e164} - waiting 5s`);
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        continue;
+      }
+      
+      if (response.status >= 500 && attempt < MAX_RETRIES - 1) {
+        console.warn(`⚠️ Server error ${response.status} for ${phone.e164}, retry ${attempt + 2}/${MAX_RETRIES}`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
+      
+      throw new Error(`API ${response.status}`);
+    }
+    
+    // 🚨 Get response as text first to see raw data
+    const responseText = await response.text();
+    console.log(`   📥 Raw response: ${responseText.substring(0, 300)}`);
+    
+    let data;
+    try {
+      data = JSON.parse(responseText);
+    } catch (parseError) {
+      console.error(`❌ JSON parse failed for ${phone.e164}:`, parseError.message);
+      throw new Error('Failed to parse JSON response');
+    }
+    
+    // 🚨 Log parsed data
+    console.log(`   📦 Parsed data:`, JSON.stringify(data, null, 2));
+    
+    // Validate response structure
+    if (!data || typeof data !== 'object') {
+      console.error(`❌ Invalid response object for ${phone.e164}`);
+      throw new Error('Invalid API response format');
+    }
+    
+    if (data.error) {
+      console.error(`❌ API returned error for ${phone.e164}:`, data.error);
+      throw new Error(data.message || data.error);
+    }
+    
+    if (!data.capabilities) {
+      console.error(`❌ Missing capabilities for ${phone.e164}`);
+      throw new Error('Missing capabilities in response');
+    }
+    
+    const capabilities = data.capabilities;
+    
+    // 🚨 Log capabilities in detail
+    console.log(`   📱 Capabilities object:`, JSON.stringify(capabilities));
+    console.log(`   📱 imessage field:`, capabilities.imessage);
+    console.log(`   📱 imessage type:`, typeof capabilities.imessage);
+    console.log(`   📱 imessage === true:`, capabilities.imessage === true);
+    console.log(`   📱 sms field:`, capabilities.sms);
+    console.log(`   📱 sms type:`, typeof capabilities.sms);
+    
+    // ✅ Defensive parsing - handle multiple cases
+    const supportsIMessage = 
+      capabilities.imessage === true || 
+      capabilities.iMessage === true ||
+      capabilities.imessage === "true" ||
+      capabilities.iMessage === "true" ||
+      String(capabilities.imessage).toLowerCase() === 'true';
+    
+    const supportsSMS = 
+      capabilities.sms === true || 
+      capabilities.SMS === true ||
+      capabilities.sms === "true" ||
+      capabilities.SMS === "true" ||
+      String(capabilities.sms).toLowerCase() === 'true';
+    
+    // 🚨 Log parsed booleans
+    console.log(`   ✅ Parsed supportsIMessage:`, supportsIMessage);
+    console.log(`   ✅ Parsed supportsSMS:`, supportsSMS);
+    
+    if (!supportsIMessage && !supportsSMS) {
+      console.warn(`⚠️ Phone ${phone.e164} has no capabilities - possible API issue`);
+    }
+    
+    const contactType = supportsIMessage ? 'iPhone' : (supportsSMS ? 'Android' : 'Unknown');
+    
+    console.log(`   📱 Final classification: ${contactType}`);
+    
+    const result = {
+      phone_number: phone.original,
+      e164: phone.e164,
+      is_ios: supportsIMessage ? 1 : 0,
+      supports_imessage: supportsIMessage ? 1 : 0,
+      supports_sms: supportsSMS ? 1 : 0,
+      contact_type: contactType,
+      error: null,
+      from_cache: false
+    };
+    
+    // 🚨 Log what we're about to save
+    console.log(`   💾 Result object to save:`, JSON.stringify(result));
+    
+    results.push(result);
+    
+    // Only cache successful results
+    await pool.execute(
+      `INSERT INTO blooio_cache 
+       (e164, is_ios, supports_imessage, supports_sms, contact_type)
+       VALUES (?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+       is_ios = VALUES(is_ios),
+       supports_imessage = VALUES(supports_imessage),
+       supports_sms = VALUES(supports_sms),
+       contact_type = VALUES(contact_type)`,
+      [
+        phone.e164,
+        supportsIMessage ? 1 : 0,
+        supportsIMessage ? 1 : 0,
+        supportsSMS ? 1 : 0,
+        result.contact_type
+      ]
+    );
+    
+    console.log(`   ✅ Saved to results and cache`);
+    
+    success = true;
+    apiCalls++;
+    
+    await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_API_CALLS));
+    
+  } catch (error) {
+    lastError = error;
+    console.error(`❌ Error processing ${phone.e164}:`, error.message);
+    
+    if ((error.message.includes('timeout') || 
+         error.message.includes('ECONNRESET') || 
+         error.message.includes('fetch failed')) && 
+        attempt < MAX_RETRIES - 1) {
+      console.warn(`⚠️ ${error.message} for ${phone.e164}, retry ${attempt + 2}/${MAX_RETRIES}`);
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      continue;
+    }
+    
+    break;
   }
-              
-              // ✅ Validate response structure
-              if (!data || typeof data !== 'object') {
-                throw new Error('Invalid API response format');
-              }
-              
-              // ✅ Check for API error responses
-              if (data.error) {
-                throw new Error(data.message || data.error);
-              }
-              
-              // ✅ Validate capabilities object exists
-              if (!data.capabilities) {
-                throw new Error('Missing capabilities in response');
-              }
-              
-              const capabilities = data.capabilities || {};
+}
 
-            // ✅ Handle both v1 and v2, case-insensitive
-            const supportsIMessage = 
-            capabilities.imessage === true || 
-            capabilities.iMessage === true ||
-            capabilities.imessage === "true" ||
-            capabilities.iMessage === "true";
-
-            const supportsSMS = 
-            capabilities.sms === true || 
-            capabilities.SMS === true ||
-            capabilities.sms === "true" ||
-            capabilities.SMS === "true";
-
-            // 🔍 Debug log
-            console.log(`📱 ${phone.e164}: iMessage=${supportsIMessage}, SMS=${supportsSMS}, raw=${JSON.stringify(capabilities)}`);
-              
-              // ✅ Log suspicious responses
-              if (!supportsIMessage && !supportsSMS) {
-                console.warn(`⚠️ Phone ${phone.e164} has no capabilities - possible API issue`);
-              }
-              
-              const result = {
-                phone_number: phone.original,
-                e164: phone.e164,
-                is_ios: supportsIMessage ? 1 : 0,
-                supports_imessage: supportsIMessage ? 1 : 0,
-                supports_sms: supportsSMS ? 1 : 0,
-                contact_type: supportsIMessage ? 'iPhone' : (supportsSMS ? 'Android' : 'Unknown'),
-                error: null,
-                from_cache: false
-              };
-              
-              results.push(result);
-              
-              // ✅ Only cache successful results (no errors)
-              await pool.execute(
-                `INSERT INTO blooio_cache 
-                 (e164, is_ios, supports_imessage, supports_sms, contact_type)
-                 VALUES (?, ?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE
-                 is_ios = VALUES(is_ios),
-                 supports_imessage = VALUES(supports_imessage),
-                 supports_sms = VALUES(supports_sms),
-                 contact_type = VALUES(contact_type)`,
-                [
-                  phone.e164,
-                  supportsIMessage ? 1 : 0,
-                  supportsIMessage ? 1 : 0,
-                  supportsSMS ? 1 : 0,
-                  result.contact_type
-                ]
-              );
-              
-              success = true;
-              apiCalls++;
-              
-              // ✅ Rate limiting: Wait 350ms before next API call
-              await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_API_CALLS));
-              
-            } catch (error) {
-              lastError = error;
-              
-              // ✅ Retry on timeouts and network errors
-              if ((error.message.includes('timeout') || 
-                   error.message.includes('ECONNRESET') || 
-                   error.message.includes('fetch failed')) && 
-                  attempt < MAX_RETRIES - 1) {
-                console.warn(`⚠️ ${error.message} for ${phone.e164}, retry ${attempt + 2}/${MAX_RETRIES}`);
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                continue; // Retry
-              }
-              
-              break; // Don't retry on other errors
-            }
-          }
-          
-          if (!success) {
-            // ✅ Mark as ERROR, don't pretend to know device type
-            console.error(`❌ Failed for ${phone.e164}: ${lastError?.message}`);
-            
-            results.push({
-              phone_number: phone.original,
-              e164: phone.e164,
-              is_ios: 0,
-              supports_imessage: 0,
-              supports_sms: 0,
-              contact_type: 'ERROR', // ✅ Explicit error marker
-              error: lastError?.message || 'Unknown error',
-              from_cache: false
-            });
-            
-            apiCalls++;
-            // ❌ DON'T cache errors!
-          }
+if (!success) {
+  console.error(`❌❌❌ All retries failed for ${phone.e164}: ${lastError?.message}`);
+  
+  results.push({
+    phone_number: phone.original,
+    e164: phone.e164,
+    is_ios: 0,
+    supports_imessage: 0,
+    supports_sms: 0,
+    contact_type: 'ERROR',
+    error: lastError?.message || 'Unknown error',
+    from_cache: false
+  });
+  
+  apiCalls++;
+}
           
           processedCount++;
           
