@@ -1,5 +1,9 @@
 import { NextResponse } from 'next/server';
 import { getConnection } from '../../../lib/db.js';
+import fs from 'fs';
+import path from 'path';
+import { parse } from 'csv-parse/sync';
+import { parsePhoneNumber } from 'libphonenumber-js';
 
 export const maxDuration = 60;
 
@@ -11,7 +15,7 @@ export async function POST(request) {
       return NextResponse.json({ success: false, error: 'fileId required' }, { status: 400 });
     }
     
-    console.log(`🔧 Rebuilding chunks for file ${fileId}...`);
+    console.log(`🔧 Finding missing phones for file ${fileId}...`);
     
     const pool = await getConnection();
     
@@ -26,9 +30,8 @@ export async function POST(request) {
     }
     
     const file = files[0];
-    console.log(`   File expects: ${file.processing_total} phones`);
     
-    // Get all processed phones
+    // Get processed phones
     const [processedPhones] = await pool.execute(
       `SELECT DISTINCT e164 FROM blooio_results WHERE file_id = ?`,
       [fileId]
@@ -37,128 +40,139 @@ export async function POST(request) {
     const processedSet = new Set(processedPhones.map(p => p.e164));
     console.log(`   Already processed: ${processedSet.size} phones`);
     
-    // Get all chunks
-    const [allChunks] = await pool.execute(
-      `SELECT chunk_data FROM processing_chunks WHERE file_id = ?`,
-      [fileId]
-    );
+    // Load CSV from uploads folder
+    const uploadsDir = path.join(process.cwd(), 'uploads');
+    const filePath = path.join(uploadsDir, file.file_name);
     
-    console.log(`   Existing chunks: ${allChunks.length}`);
+    console.log(`   Looking for CSV at: ${filePath}`);
     
-    // Extract ALL unique phones from chunks (deduplicating)
-    const uniquePhones = new Map(); // e164 -> phone object
-    
-    for (const chunk of allChunks) {
-      try {
-        const phones = JSON.parse(chunk.chunk_data);
-        for (const phone of phones) {
-          if (!uniquePhones.has(phone.e164)) {
-            uniquePhones.set(phone.e164, phone);
-          }
-        }
-      } catch (e) {
-        console.error('Failed to parse chunk:', e);
+    if (!fs.existsSync(filePath)) {
+      // Try public/uploads
+      const publicPath = path.join(process.cwd(), 'public', 'uploads', file.file_name);
+      console.log(`   Trying: ${publicPath}`);
+      
+      if (!fs.existsSync(publicPath)) {
+        return NextResponse.json({ 
+          success: false, 
+          error: `CSV file not found. Tried: ${filePath} and ${publicPath}. Please re-upload the file.` 
+        }, { status: 404 });
       }
+      
+      // Use public path
+      const fileContent = fs.readFileSync(publicPath, 'utf-8');
+      return processCSV(fileContent, file, processedSet, pool, fileId);
     }
     
-    console.log(`   Unique phones in chunks: ${uniquePhones.size}`);
-    
-    // Find unprocessed phones
-    const unprocessedPhones = [];
-    for (const [e164, phone] of uniquePhones) {
-      if (!processedSet.has(e164)) {
-        unprocessedPhones.push(phone);
-      }
-    }
-    
-    console.log(`   Unprocessed phones: ${unprocessedPhones.length}`);
-    
-    if (unprocessedPhones.length === 0) {
-      console.log('✅ All phones processed!');
-      
-      // Delete all chunks
-      await pool.execute(
-        `DELETE FROM processing_chunks WHERE file_id = ?`,
-        [fileId]
-      );
-      
-      // Mark file as complete
-      await pool.execute(
-        `UPDATE uploaded_files 
-         SET processing_status = 'completed',
-             processing_progress = 100,
-             processing_offset = ?
-         WHERE id = ?`,
-        [processedSet.size, fileId]
-      );
-      
-      return NextResponse.json({
-        success: true,
-        message: 'All phones processed - file marked complete',
-        uniquePhonesFound: uniquePhones.size,
-        processed: processedSet.size,
-        unprocessed: 0
-      });
-    }
-    
-    // Delete ALL old chunks (they're duplicated)
-    await pool.execute(
-      `DELETE FROM processing_chunks WHERE file_id = ?`,
-      [fileId]
-    );
-    
-    console.log('   Deleted all old chunks');
-    
-    // Create clean chunks for unprocessed phones only
-    const CHUNK_SIZE = 500;
-    let chunkCount = 0;
-    
-    for (let i = 0; i < unprocessedPhones.length; i += CHUNK_SIZE) {
-      const chunkPhones = unprocessedPhones.slice(i, i + CHUNK_SIZE);
-      
-      await pool.execute(
-        `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
-         VALUES (?, ?, ?, 'pending')`,
-        [
-          fileId,
-          i,
-          JSON.stringify(chunkPhones)
-        ]
-      );
-      
-      chunkCount++;
-      
-      if (chunkCount % 50 === 0) {
-        console.log(`   Created ${chunkCount} chunks...`);
-      }
-    }
-    
-    console.log(`✅ Created ${chunkCount} clean chunks for ${unprocessedPhones.length} unprocessed phones`);
-    
-    // Resume processing
-    await pool.execute(
-      `UPDATE uploaded_files 
-       SET processing_status = 'processing'
-       WHERE id = ?`,
-      [fileId]
-    );
-    
-    return NextResponse.json({
-      success: true,
-      fileId: fileId,
-      uniquePhonesFound: uniquePhones.size,
-      alreadyProcessed: processedSet.size,
-      unprocessed: unprocessedPhones.length,
-      chunksCreated: chunkCount,
-      message: `Created ${chunkCount} clean chunks. Processing will resume automatically.`
-    });
+    const fileContent = fs.readFileSync(filePath, 'utf-8');
+    return processCSV(fileContent, file, processedSet, pool, fileId);
     
   } catch (error) {
-    console.error('Rebuild chunks error:', error);
+    console.error('Error:', error);
     return NextResponse.json({
       success: false,
       error: error.message,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     }, { status: 500 });
   }
+}
+
+async function processCSV(fileContent, file, processedSet, pool, fileId) {
+  const records = parse(fileContent, {
+    columns: true,
+    skip_empty_lines: true,
+    trim: true
+  });
+  
+  console.log(`   Total records in CSV: ${records.length}`);
+  
+  // Parse all phones
+  const allPhones = [];
+  const seenE164 = new Set();
+  
+  for (const record of records) {
+    const phoneColumn = Object.keys(record)[0];
+    const rawPhone = record[phoneColumn];
+    
+    if (!rawPhone) continue;
+    
+    try {
+      const parsed = parsePhoneNumber(rawPhone, 'US');
+      if (parsed && parsed.isValid()) {
+        const e164 = parsed.format('E.164');
+        
+        if (!seenE164.has(e164)) {
+          seenE164.add(e164);
+          allPhones.push({
+            original: rawPhone,
+            e164: e164
+          });
+        }
+      }
+    } catch (error) {
+      // Skip invalid
+    }
+  }
+  
+  console.log(`   Unique valid phones in CSV: ${allPhones.length}`);
+  
+  // Find unprocessed
+  const unprocessedPhones = allPhones.filter(p => !processedSet.has(p.e164));
+  
+  console.log(`   Unprocessed phones: ${unprocessedPhones.length}`);
+  
+  if (unprocessedPhones.length === 0) {
+    await pool.execute(
+      `UPDATE uploaded_files 
+       SET processing_status = 'completed',
+           processing_progress = 100
+       WHERE id = ?`,
+      [fileId]
+    );
+    
+    return NextResponse.json({
+      success: true,
+      message: 'All phones processed!',
+      totalInCSV: allPhones.length,
+      processed: processedSet.size,
+      unprocessed: 0
+    });
+  }
+  
+  // Create chunks
+  const CHUNK_SIZE = 500;
+  let chunkCount = 0;
+  
+  for (let i = 0; i < unprocessedPhones.length; i += CHUNK_SIZE) {
+    const chunkPhones = unprocessedPhones.slice(i, i + CHUNK_SIZE);
+    
+    await pool.execute(
+      `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
+       VALUES (?, ?, ?, 'pending')`,
+      [
+        fileId,
+        1000000 + i, // High offset to avoid conflicts
+        JSON.stringify(chunkPhones)
+      ]
+    );
+    
+    chunkCount++;
+  }
+  
+  console.log(`✅ Created ${chunkCount} chunks for ${unprocessedPhones.length} missing phones`);
+  
+  // Resume processing
+  await pool.execute(
+    `UPDATE uploaded_files 
+     SET processing_status = 'processing'
+     WHERE id = ?`,
+    [fileId]
+  );
+  
+  return NextResponse.json({
+    success: true,
+    totalInCSV: allPhones.length,
+    alreadyProcessed: processedSet.size,
+    unprocessed: unprocessedPhones.length,
+    chunksCreated: chunkCount
+  });
 }
