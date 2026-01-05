@@ -124,7 +124,7 @@ async function processQueue(request) {
           for (let attempt = 0; attempt < MAX_RETRIES && !success; attempt++) {
             try {
               const response = await fetch(
-                `https://backend.blooio.com/v1/api/contacts/${encodeURIComponent(phone.e164)}/capabilities`,
+                `https://backend.blooio.com/v2/api/contacts/${encodeURIComponent(phone.e164)}/capabilities`,
                 {
                   method: 'GET',
                   headers: {

@@ -11,7 +11,7 @@ export async function GET(request) {
       formattedPhone = '+' + phone;
     }
     
-    const apiUrl = `https://backend.blooio.com/v1/api/contacts/${encodeURIComponent(formattedPhone)}/capabilities`;
+    const apiUrl = `https://backend.blooio.com/v2/api/contacts/${encodeURIComponent(formattedPhone)}/capabilities`;
     
     console.log(`Testing Blooio API`);
     console.log(`Phone: ${formattedPhone}`);

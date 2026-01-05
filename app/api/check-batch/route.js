@@ -12,7 +12,7 @@ import { getBlooioCache, saveBlooioCache } from '../../../lib/phoneCache.js';
 import Papa from 'papaparse';
 
 export const maxDuration = 300;
-const BLOOIO_API_URL = 'https://backend.blooio.com/v1/api/contacts';
+const BLOOIO_API_URL = 'https://backend.blooio.com/v2/api/contacts';
 
 async function checkSingleNumberWithCache(phoneNumber, batchId, fileId) {
   const formattedPhone = `+${phoneNumber}`;

@@ -12,7 +12,7 @@ import { getBlooioCacheBatch, saveBlooioCacheBatch } from '../../../lib/phoneCac
 import Papa from 'papaparse';
 
 export const maxDuration = 300;
-const BLOOIO_API_URL = 'https://backend.blooio.com/v1/api/contacts';
+const BLOOIO_API_URL = 'https://backend.blooio.com/v2/api/contacts';
 
 async function checkSingleNumberWithAPI(phoneNumber, batchId) {
   const formattedPhone = `+${phoneNumber}`;
