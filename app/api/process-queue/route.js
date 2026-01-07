@@ -53,6 +53,14 @@ async function processQueue(request) {
        WHERE id = ?`,
       [file.id]
     );
+    // Reset any stuck chunks for this file
+await pool.execute(
+    `UPDATE processing_chunks 
+     SET chunk_status = 'pending'
+     WHERE file_id = ?
+     AND chunk_status = 'processing'`,
+    [file.id]
+  );
     
     let totalProcessed = 0;
     let chunksProcessed = 0;
@@ -78,17 +86,10 @@ async function processQueue(request) {
         break;
       }
       
-      const chunk = chunks[0];
-      if (shouldLog.debug) {
-        console.log(`Chunk ${chunk.id} offset ${chunk.chunk_offset}`);
-      }      
-      await pool.execute(
-        `UPDATE processing_chunks 
-         SET chunk_status = 'pending',
-             retry_count = COALESCE(retry_count, 0) + 1
-         WHERE chunk_status = 'processing' 
-         AND TIMESTAMPDIFF(MINUTE, updated_at, NOW()) > 10`
-      );
+const chunk = chunks[0];
+if (shouldLog.debug) {
+  console.log(`Chunk ${chunk.id} offset ${chunk.chunk_offset}`);
+}
       
       try {
         const phoneData = JSON.parse(chunk.chunk_data);
