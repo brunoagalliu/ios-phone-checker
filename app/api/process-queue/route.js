@@ -4,24 +4,34 @@ import { getConnection } from '../../../lib/db.js';
 export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
 
+// ✅ Logging control
+const LOG_LEVEL = process.env.LOG_LEVEL || 'INFO'; // DEBUG, INFO, WARN, ERROR
+const shouldLog = {
+  debug: LOG_LEVEL === 'DEBUG',
+  info: ['DEBUG', 'INFO'].includes(LOG_LEVEL),
+  warn: ['DEBUG', 'INFO', 'WARN'].includes(LOG_LEVEL),
+  error: true // Always log errors
+};
+
 async function processQueue(request) {
   const startTime = Date.now();
   const MAX_PROCESSING_TIME = 280000; // 280 seconds
   
-  console.log('\n=== PROCESS QUEUE TRIGGERED ===');
-  console.log(`Time: ${new Date().toISOString()}`);
-  console.log(`Method: ${request?.method || 'CRON'}`);
+  if (shouldLog.info) {
+    console.log(`[${new Date().toISOString()}] Process queue started`);
+  }
   
   const pool = await getConnection();
   
   try {
     const [files] = await pool.execute(
-      `SELECT * FROM uploaded_files 
-       WHERE processing_status IN ('initialized', 'processing')
-       AND processing_offset < processing_total
-       ORDER BY upload_date ASC
-       LIMIT 1`
-    );
+        `SELECT * FROM uploaded_files 
+         WHERE processing_status IN ('initialized', 'processing')
+         AND processing_offset < processing_total
+         ORDER BY upload_date ASC
+         LIMIT 1
+         FOR UPDATE` // ✅ Lock the row to prevent concurrent processing
+      );
     
     if (files.length === 0) {
       console.log('✓ No files to process');
@@ -33,10 +43,9 @@ async function processQueue(request) {
     }
     
     const file = files[0];
-    console.log(`\n📄 PROCESSING FILE ${file.id}: ${file.file_name}`);
-    console.log(`   Status: ${file.processing_status}`);
-    console.log(`   Progress: ${file.processing_offset}/${file.processing_total} (${file.processing_progress}%)`);
-    console.log(`   Service: ${file.service}`);
+    if (shouldLog.info) {
+        console.log(`Processing file ${file.id}: ${file.processing_offset}/${file.processing_total} (${file.processing_progress}%)`);
+      }
     
     await pool.execute(
       `UPDATE uploaded_files 
@@ -49,14 +58,20 @@ async function processQueue(request) {
     let chunksProcessed = 0;
     
     while (Date.now() - startTime < MAX_PROCESSING_TIME) {
-      const [chunks] = await pool.execute(
-        `SELECT * FROM processing_chunks
-         WHERE file_id = ? 
-         AND chunk_status = 'pending'
-         ORDER BY chunk_offset ASC
-         LIMIT 1`,
-        [file.id]
-      );
+        const [chunks] = await pool.execute(
+            `SELECT * FROM processing_chunks
+             WHERE file_id = ? 
+             AND chunk_status IN ('pending', 'failed')
+             AND (retry_count < 3 OR retry_count IS NULL)
+             ORDER BY 
+               CASE chunk_status 
+                 WHEN 'pending' THEN 0 
+                 WHEN 'failed' THEN 1 
+               END,
+               chunk_offset ASC
+             LIMIT 1`,
+            [file.id]
+          );
       
       if (chunks.length === 0) {
         console.log('✓ No more chunks to process');
@@ -64,13 +79,15 @@ async function processQueue(request) {
       }
       
       const chunk = chunks[0];
-      console.log(`\n📦 Processing chunk ${chunk.id} (offset: ${chunk.chunk_offset})`);
-      
+      if (shouldLog.debug) {
+        console.log(`Chunk ${chunk.id} offset ${chunk.chunk_offset}`);
+      }      
       await pool.execute(
         `UPDATE processing_chunks 
-         SET chunk_status = 'processing'
-         WHERE id = ?`,
-        [chunk.id]
+         SET chunk_status = 'pending',
+             retry_count = COALESCE(retry_count, 0) + 1
+         WHERE chunk_status = 'processing' 
+         AND TIMESTAMPDIFF(MINUTE, updated_at, NOW()) > 10`
       );
       
       try {
@@ -82,8 +99,11 @@ async function processQueue(request) {
         let cacheHits = 0;
         let apiCalls = 0;
         
+        let lastApiCallTime = 0;
+const MIN_API_INTERVAL = 500; 
+
         // ✅ Sequential processing with proper rate limiting (3 req/sec)
-        const DELAY_BETWEEN_API_CALLS = 350; // 350ms = ~2.9 req/sec
+        const DELAY_BETWEEN_API_CALLS = 500; // 350ms = ~2.9 req/sec
         
         for (let i = 0; i < phoneData.length; i++) {
           if (Date.now() - startTime > MAX_PROCESSING_TIME) {
@@ -161,68 +181,38 @@ for (let attempt = 0; attempt < MAX_RETRIES && !success; attempt++) {
       throw new Error(`API ${response.status}`);
     }
     
-    // 🚨 Get response as text first to see raw data
     const responseText = await response.text();
-    console.log(`   📥 Raw response: ${responseText.substring(0, 300)}`);
-    
     let data;
     try {
       data = JSON.parse(responseText);
     } catch (parseError) {
-      console.error(`❌ JSON parse failed for ${phone.e164}:`, parseError.message);
+      console.error(`Parse error ${phone.e164}: ${parseError.message}`);
       throw new Error('Failed to parse JSON response');
     }
     
-    // 🚨 Log parsed data
-    console.log(`   📦 Parsed data:`, JSON.stringify(data, null, 2));
-    
-    // Validate response structure
+    // Only log errors or suspicious responses
     if (!data || typeof data !== 'object') {
-      console.error(`❌ Invalid response object for ${phone.e164}`);
+      console.error(`Invalid response for ${phone.e164}`);
       throw new Error('Invalid API response format');
     }
     
     if (data.error) {
-      console.error(`❌ API returned error for ${phone.e164}:`, data.error);
+      console.error(`API error for ${phone.e164}: ${data.error}`);
       throw new Error(data.message || data.error);
     }
     
     if (!data.capabilities) {
-      console.error(`❌ Missing capabilities for ${phone.e164}`);
+      console.error(`Missing capabilities for ${phone.e164}`);
       throw new Error('Missing capabilities in response');
     }
     
     const capabilities = data.capabilities;
+    const supportsIMessage = capabilities.imessage === true;
+    const supportsSMS = capabilities.sms === true;
     
-    // 🚨 Log capabilities in detail
-    console.log(`   📱 Capabilities object:`, JSON.stringify(capabilities));
-    console.log(`   📱 imessage field:`, capabilities.imessage);
-    console.log(`   📱 imessage type:`, typeof capabilities.imessage);
-    console.log(`   📱 imessage === true:`, capabilities.imessage === true);
-    console.log(`   📱 sms field:`, capabilities.sms);
-    console.log(`   📱 sms type:`, typeof capabilities.sms);
-    
-    // ✅ Defensive parsing - handle multiple cases
-    const supportsIMessage = 
-      capabilities.imessage === true || 
-      capabilities.iMessage === true ||
-      capabilities.imessage === "true" ||
-      capabilities.iMessage === "true" ||
-      String(capabilities.imessage).toLowerCase() === 'true';
-    
-    const supportsSMS = 
-      capabilities.sms === true || 
-      capabilities.SMS === true ||
-      capabilities.sms === "true" ||
-      capabilities.SMS === "true" ||
-      String(capabilities.sms).toLowerCase() === 'true';
-    
-    // 🚨 Log parsed booleans
-    console.log(`   ✅ Parsed supportsIMessage:`, supportsIMessage);
-    console.log(`   ✅ Parsed supportsSMS:`, supportsSMS);
-    
-    if (!supportsIMessage && !supportsSMS) {
-      console.warn(`⚠️ Phone ${phone.e164} has no capabilities - possible API issue`);
+    // Only log suspicious results
+    if (!supportsIMessage && !supportsSMS && shouldLog.warn) {
+      console.warn(`No capabilities: ${phone.e164}`);
     }
     
     const contactType = supportsIMessage ? 'iPhone' : (supportsSMS ? 'Android' : 'Unknown');
@@ -269,7 +259,17 @@ for (let attempt = 0; attempt < MAX_RETRIES && !success; attempt++) {
     success = true;
     apiCalls++;
     
-    await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_API_CALLS));
+    // ✅ STRICT rate limiting: Ensure minimum 500ms between API calls
+    const now = Date.now();
+    const timeSinceLastCall = now - lastApiCallTime;
+    const waitTime = Math.max(MIN_API_INTERVAL - timeSinceLastCall, 0);
+    
+    if (waitTime > 0) {
+      console.log(`   ⏱️ Rate limit: waiting ${waitTime}ms`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+    
+    lastApiCallTime = Date.now();
     
   } catch (error) {
     lastError = error;
@@ -307,15 +307,14 @@ if (!success) {
           
           processedCount++;
           
-          // Log progress every 50 phones
-          if (processedCount % 50 === 0 || processedCount === phoneData.length) {
-            console.log(`   📊 ${processedCount}/${phoneData.length} phones | Cache: ${cacheHits} | API: ${apiCalls}`);
+          if (shouldLog.info && processedCount % 100 === 0) {
+            console.log(`${processedCount}/${phoneData.length} phones (Cache: ${cacheHits}, API: ${apiCalls})`);
           }
         }
         
         // Save results
         if (results.length > 0) {
-          console.log(`--- Saving ${results.length} results ---`);
+
           
           const values = results.map(r => 
             `(${file.id}, ${pool.escape(r.phone_number)}, ${pool.escape(r.e164)}, ${r.is_ios}, ${r.supports_imessage}, ${r.supports_sms}, ${pool.escape(r.contact_type)}, ${pool.escape(r.error)}, ${r.from_cache ? 1 : 0})`
@@ -327,7 +326,9 @@ if (!success) {
              VALUES ${values}`
           );
           
-          console.log(`✅ Saved ${results.length} results to database`);
+          if (shouldLog.debug) {
+            console.log(`Saving ${results.length} results`);
+          }
         }
         
         // Check if chunk was fully processed
@@ -341,47 +342,44 @@ if (!success) {
             [chunk.id]
           );
           
-          console.log(`✅ Chunk ${chunk.id} fully completed (${processedCount}/${phoneData.length})`);
           
         } else {
-          // Partial completion - create new chunk with remaining phones
-          const remainingPhones = phoneData.slice(processedCount);
-          
-          console.log(`⚠️ Chunk partially completed: ${processedCount}/${phoneData.length}`);
-          console.log(`   Creating new chunk with ${remainingPhones.length} remaining phones`);
-          
-          // ✅ Check if we've already hit the file total (prevent over-processing)
-          const [fileCheck] = await pool.execute(
-            `SELECT processing_offset, processing_total FROM uploaded_files WHERE id = ?`,
-            [file.id]
-          );
-          
-          // ✅ Only create new chunk if we haven't exceeded the file total
-          if (fileCheck[0].processing_offset + remainingPhones.length <= fileCheck[0].processing_total) {
-            await pool.execute(
-              `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
-               VALUES (?, ?, ?, 'pending')`,
-              [
-                file.id,
-                chunk.chunk_offset + processedCount,
-                JSON.stringify(remainingPhones)
-              ]
+            // Partial completion - create new chunk with remaining phones
+            const remainingPhones = phoneData.slice(processedCount);
+            
+            
+            // ✅ Check if we've already hit the file total (prevent over-processing)
+            const [fileCheck] = await pool.execute(
+              `SELECT processing_offset, processing_total FROM uploaded_files WHERE id = ?`,
+              [file.id]
             );
             
-            console.log(`✅ New chunk created at offset ${chunk.chunk_offset + processedCount}`);
-          } else {
-            console.log(`⚠️ Skipping new chunk - would exceed file total`);
+            // ✅ Only create new chunk if we haven't exceeded the file total
+            if (fileCheck[0].processing_offset + remainingPhones.length <= fileCheck[0].processing_total) {
+              await pool.execute(
+                `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
+                 VALUES (?, ?, ?, 'pending')`,
+                [
+                  file.id,
+                  chunk.chunk_offset + processedCount,
+                  JSON.stringify(remainingPhones)
+                ]
+              );
+              
+              if (shouldLog.info && !fullyProcessed) {
+                console.log(`Chunk partial: ${processedCount}/${phoneData.length}, new chunk: ${remainingPhones.length} phones`);
+              }            } else {
+              console.log(`⚠️ Skipping new chunk - would exceed file total`);
+            }
+            
+            // Mark original chunk as completed
+            await pool.execute(
+              `UPDATE processing_chunks 
+               SET chunk_status = 'completed'
+               WHERE id = ?`,
+              [chunk.id]
+            );
           }
-          
-          await pool.execute(
-            `UPDATE processing_chunks 
-             SET chunk_status = 'completed'
-             WHERE id = ?`,
-            [chunk.id]
-          );
-          
-          console.log(`✅ Original chunk marked complete`);
-        }
         
         // Update file progress by actual processed count
         await pool.execute(
@@ -404,15 +402,54 @@ if (!success) {
         console.log(`✅ Chunk completed: ${updatedFile[0].processing_offset}/${file.processing_total} (${updatedFile[0].processing_progress}%)`);
         console.log(`   Cache hits: ${cacheHits}, API calls: ${apiCalls}`);
         
-      } catch (chunkError) {
+        // ✅ Log actual rate achieved
+        if (apiCalls > 0) {
+          const chunkDuration = (Date.now() - startTime) / 1000;
+          const actualRate = apiCalls / chunkDuration;
+          console.log(`   📊 Actual API rate: ${actualRate.toFixed(2)} req/sec`);
+          
+          if (actualRate > 2.1) {
+            console.warn(`   ⚠️ WARNING: Rate exceeded 2 req/sec! Actual: ${actualRate.toFixed(2)}`);
+          }
+        }
+
+        
+        
+    } catch (chunkError) {
         console.error('Chunk processing error:', chunkError);
         
-        await pool.execute(
-          `UPDATE processing_chunks 
-           SET chunk_status = 'failed'
-           WHERE id = ?`,
+        // Get current retry count
+        const [chunkInfo] = await pool.execute(
+          `SELECT retry_count FROM processing_chunks WHERE id = ?`,
           [chunk.id]
         );
+        
+        const retryCount = (chunkInfo[0]?.retry_count || 0) + 1;
+        const maxRetries = 3;
+        
+        if (retryCount < maxRetries) {
+          // Mark as failed but allow retry
+          await pool.execute(
+            `UPDATE processing_chunks 
+             SET chunk_status = 'failed',
+                 retry_count = ?
+             WHERE id = ?`,
+            [retryCount, chunk.id]
+          );
+          
+          console.warn(`⚠️ Chunk ${chunk.id} failed (attempt ${retryCount}/${maxRetries}), will retry`);
+        } else {
+          // Max retries reached, mark as permanently failed
+          await pool.execute(
+            `UPDATE processing_chunks 
+             SET chunk_status = 'failed_permanent',
+                 retry_count = ?
+             WHERE id = ?`,
+            [retryCount, chunk.id]
+          );
+          
+          console.error(`❌ Chunk ${chunk.id} permanently failed after ${maxRetries} attempts`);
+        }
         
         await pool.execute(
           `UPDATE uploaded_files 
