@@ -93,7 +93,7 @@ if (shouldLog.debug) {
       
       try {
         const phoneData = JSON.parse(chunk.chunk_data);
-        console.log(`   Phones in chunk: ${phoneData.length}`);
+        // console.log(`   Phones in chunk: ${phoneData.length}`);
         
         const results = [];
         let processedCount = 0;
@@ -151,7 +151,7 @@ const MAX_RETRIES = 3;
 
 for (let attempt = 0; attempt < MAX_RETRIES && !success; attempt++) {
   try {
-    console.log(`🔵 Calling Blooio for ${phone.e164} (attempt ${attempt + 1})`);
+    // console.log(`🔵 Calling Blooio for ${phone.e164} (attempt ${attempt + 1})`);
     
     const response = await fetch(
       `https://backend.blooio.com/v2/api/contacts/${encodeURIComponent(phone.e164)}/capabilities`,
@@ -164,7 +164,7 @@ for (let attempt = 0; attempt < MAX_RETRIES && !success; attempt++) {
       }
     );
     
-    console.log(`   Response status: ${response.status}`);
+    // console.log(`   Response status: ${response.status}`);
     
     if (!response.ok) {
       if (response.status === 429) {
@@ -232,7 +232,7 @@ for (let attempt = 0; attempt < MAX_RETRIES && !success; attempt++) {
     };
     
     // 🚨 Log what we're about to save
-    console.log(`   💾 Result object to save:`, JSON.stringify(result));
+    // console.log(`   💾 Result object to save:`, JSON.stringify(result));
     
     results.push(result);
     
@@ -255,7 +255,7 @@ for (let attempt = 0; attempt < MAX_RETRIES && !success; attempt++) {
       ]
     );
     
-    console.log(`   ✅ Saved to results and cache`);
+    // console.log(`   ✅ Saved to results and cache`);
     
     success = true;
     apiCalls++;
@@ -266,7 +266,7 @@ for (let attempt = 0; attempt < MAX_RETRIES && !success; attempt++) {
     const waitTime = Math.max(MIN_API_INTERVAL - timeSinceLastCall, 0);
     
     if (waitTime > 0) {
-      console.log(`   ⏱️ Rate limit: waiting ${waitTime}ms`);
+    //   console.log(`   ⏱️ Rate limit: waiting ${waitTime}ms`);
       await new Promise(resolve => setTimeout(resolve, waitTime));
     }
     
@@ -400,14 +400,14 @@ if (!success) {
         totalProcessed += processedCount;
         chunksProcessed++;
         
-        console.log(`✅ Chunk completed: ${updatedFile[0].processing_offset}/${file.processing_total} (${updatedFile[0].processing_progress}%)`);
-        console.log(`   Cache hits: ${cacheHits}, API calls: ${apiCalls}`);
+        // console.log(`✅ Chunk completed: ${updatedFile[0].processing_offset}/${file.processing_total} (${updatedFile[0].processing_progress}%)`);
+        // console.log(`   Cache hits: ${cacheHits}, API calls: ${apiCalls}`);
         
         // ✅ Log actual rate achieved
         if (apiCalls > 0) {
           const chunkDuration = (Date.now() - startTime) / 1000;
           const actualRate = apiCalls / chunkDuration;
-          console.log(`   📊 Actual API rate: ${actualRate.toFixed(2)} req/sec`);
+        //   console.log(`   📊 Actual API rate: ${actualRate.toFixed(2)} req/sec`);
           
           if (actualRate > 2.1) {
             console.warn(`   ⚠️ WARNING: Rate exceeded 2 req/sec! Actual: ${actualRate.toFixed(2)}`);
@@ -480,7 +480,7 @@ if (!success) {
     
     // ✅ Only mark complete if offset reached AND no pending chunks
     if (currentFile.processing_offset >= currentFile.processing_total && pendingChunks[0].pending_count === 0) {
-      console.log(`\n🎉 FILE ${file.id} COMPLETED!`);
+    //   console.log(`\n🎉 FILE ${file.id} COMPLETED!`);
       
       // ✅ Run data quality check
       const [qualityCheck] = await pool.execute(`
@@ -496,10 +496,10 @@ if (!success) {
       const iphonePct = (stats.iphones / stats.total * 100);
       const errorPct = (stats.errors / stats.total * 100);
       
-      console.log(`\n📊 Quality Check:`);
-      console.log(`   Total: ${stats.total}`);
-      console.log(`   iPhones: ${stats.iphones} (${iphonePct.toFixed(1)}%)`);
-      console.log(`   Errors: ${stats.errors} (${errorPct.toFixed(1)}%)`);
+    //   console.log(`\n📊 Quality Check:`);
+    //   console.log(`   Total: ${stats.total}`);
+    //   console.log(`   iPhones: ${stats.iphones} (${iphonePct.toFixed(1)}%)`);
+    //   console.log(`   Errors: ${stats.errors} (${errorPct.toFixed(1)}%)`);
       
       if (iphonePct < 30) {
         console.warn(`⚠️ WARNING: Only ${iphonePct.toFixed(1)}% iPhones detected - expected 30-50%`);
@@ -521,8 +521,8 @@ if (!success) {
     }
     
     const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`\n✓ Processed ${totalProcessed} phones in ${chunksProcessed} chunks`);
-    console.log(`✓ Elapsed time: ${elapsedTime}s`);
+    // console.log(`\n✓ Processed ${totalProcessed} phones in ${chunksProcessed} chunks`);
+    // console.log(`✓ Elapsed time: ${elapsedTime}s`);
     
     return NextResponse.json({
       success: true,
