@@ -1,374 +1,125 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-
-export default function ActiveFiles() {
-  const [activeFiles, setActiveFiles] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  
-  const fetchingRef = useRef(false);
-  const mountedRef = useRef(true);
-
-  const fetchActiveFiles = useCallback(async () => {
-    if (fetchingRef.current) {
-      return;
-    }
-    
-    fetchingRef.current = true;
-    
-    try {
-      const response = await fetch('/api/active-files');
-      
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-      
-      const data = await response.json();
-      
-      if (!mountedRef.current) return;
-      
-      if (data && data.success) {
-        const files = Array.isArray(data.activeFiles) ? data.activeFiles : [];
-        setActiveFiles(files);
-        setError(null);
-      } else {
-        throw new Error(data?.error || 'Failed to fetch active files');
-      }
-    } catch (error) {
-      console.error('Failed to fetch active files:', error);
-      if (mountedRef.current) {
-        setError(error.message);
-        setActiveFiles([]);
-      }
-    } finally {
-      if (mountedRef.current) {
-        setLoading(false);
-      }
-      fetchingRef.current = false;
-    }
-  }, []);
-
-  useEffect(() => {
-    mountedRef.current = true;
-    
-    fetchActiveFiles();
-    
-    const interval = setInterval(fetchActiveFiles, 10000);
-    
-    return () => {
-      mountedRef.current = false;
-      clearInterval(interval);
-    };
-  }, [fetchActiveFiles]);
-
-  const handleResume = async (fileId) => {
-    try {
-      const response = await fetch('/api/resume-processing', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileId })
-      });
-      
-      const data = await response.json();
-      
-      if (data.success) {
-        alert(`✅ Processing resumed for File ${fileId}`);
-        fetchActiveFiles();
-      } else {
-        alert(`❌ Failed to resume: ${data.error}`);
-      }
-    } catch (error) {
-      alert(`❌ Error: ${error.message}`);
-    }
-  };
-
-  const handleCancel = async (fileId) => {
-    if (!confirm('Are you sure you want to cancel this file?')) return;
-    
-    try {
-      const response = await fetch('/api/cancel-processing', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileId })
-      });
-      
-      const data = await response.json();
-      
-      if (data.success) {
-        alert(`✅ Processing cancelled for File ${fileId}`);
-        fetchActiveFiles();
-      } else {
-        alert(`❌ Failed to cancel: ${data.error}`);
-      }
-    } catch (error) {
-      alert(`❌ Error: ${error.message}`);
-    }
-  };
-
-  if (!Array.isArray(activeFiles)) {
-    return null;
-  }
-
-  if (loading && activeFiles.length === 0) {
+export default function ActiveFiles({ files, isLoading }) {
+  if (isLoading) {
     return (
-      <div style={styles.container}>
-        <h3 style={styles.title}>🔄 Active Processing</h3>
-        <div style={styles.loading}>
-          <div style={styles.spinner}></div>
-          <span>Loading active files...</span>
-        </div>
+      <div style={styles.section}>
+        <h2 style={styles.sectionTitle}>⚙️ Active Processing</h2>
+        <div style={styles.loading}>Loading...</div>
       </div>
     );
   }
 
-  if (error && activeFiles.length === 0) {
+  if (!files || files.length === 0) {
     return (
-      <div style={styles.container}>
-        <h3 style={styles.title}>🔄 Active Processing</h3>
-        <div style={styles.errorBox}>
-          <div style={styles.errorIcon}>⚠️</div>
-          <div style={styles.errorText}>
-            Could not load active files: {error}
-          </div>
-          <button 
-            onClick={fetchActiveFiles} 
-            style={styles.retryButton}
-          >
-            🔄 Retry
-          </button>
-        </div>
+      <div style={styles.section}>
+        <h2 style={styles.sectionTitle}>⚙️ Active Processing</h2>
+        <div style={styles.emptyState}>No files currently processing</div>
       </div>
     );
-  }
-
-  if (activeFiles.length === 0) {
-    return null;
   }
 
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <h3 style={styles.title}>🔄 Active Processing</h3>
-        {error && (
-          <span style={styles.errorBadge} title={error}>
-            ⚠️ Update failed
-          </span>
-        )}
-      </div>
-      
-      {activeFiles.map(file => {
-        if (!file || !file.id) return null;
-        
-        const progress = parseFloat(file.processing_progress) || 0;
-        const isProcessing = file.processing_status === 'processing';
-        const canResume = file.can_resume && progress < 100;
-        
-        return (
+    <div style={styles.section}>
+      <h2 style={styles.sectionTitle}>⚙️ Active Processing</h2>
+      <div style={styles.fileList}>
+        {files.map(file => (
           <div key={file.id} style={styles.fileCard}>
             <div style={styles.fileHeader}>
-              <div>
-                <div style={styles.fileName}>{file.file_name || 'Unknown File'}</div>
-                <div style={styles.fileInfo}>
-                  File ID: {file.id} • {(file.processing_total || 0).toLocaleString()} records
-                </div>
-              </div>
-              
-              <div style={styles.status}>
-                {isProcessing ? '🔄 Processing' : '⏸️ Paused'}
-              </div>
+              <span style={styles.fileName}>📄 {file.file_name}</span>
+              <span style={{...styles.badge, ...styles.processingBadge}}>
+                {file.processing_status}
+              </span>
             </div>
-            
             <div style={styles.progressBar}>
               <div 
                 style={{
-                  height: '100%',
-                  transition: 'width 0.3s ease',
-                  width: `${Math.min(100, Math.max(0, progress))}%`,
-                  background: isProcessing 
-                    ? 'linear-gradient(90deg, #667eea 0%, #764ba2 100%)'
-                    : 'linear-gradient(90deg, #fbbf24 0%, #f59e0b 100%)'
+                  ...styles.progressFill,
+                  width: `${file.processing_progress}%`
                 }}
               />
             </div>
-            
-            <div style={styles.progressText}>
-              {(file.processing_offset || 0).toLocaleString()} / {(file.processing_total || 0).toLocaleString()} ({progress.toFixed(1)}%)
-            </div>
-            
-            <div style={styles.actions}>
-              {canResume && !isProcessing && (
-                <button 
-                  onClick={() => handleResume(file.id)}
-                  style={styles.resumeButton}
-                >
-                  ▶️ Resume
-                </button>
-              )}
-              
-              {isProcessing && (
-                <div style={styles.processingNote}>
-                  ⚡ Processing automatically...
-                </div>
-              )}
-              
-              <button 
-                onClick={() => handleCancel(file.id)}
-                style={styles.cancelButton}
-              >
-                ❌ Cancel
-              </button>
+            <div style={styles.fileStats}>
+              <span>{file.processing_offset?.toLocaleString()} / {file.processing_total?.toLocaleString()}</span>
+              <span>{file.processing_progress}%</span>
             </div>
           </div>
-        );
-      })}
+        ))}
+      </div>
     </div>
   );
 }
 
 const styles = {
-  container: {
-    maxWidth: '800px',
-    margin: '20px auto',
-    padding: '20px',
-    background: '#ffffff',
-    borderRadius: '12px',
-    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.1)'
+  section: {
+    marginBottom: '30px',
   },
-  header: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: '20px'
-  },
-  title: {
-    fontSize: '24px',
+  sectionTitle: {
+    fontSize: '20px',
     fontWeight: '600',
-    color: '#1f2937',
-    margin: 0
+    color: '#333',
+    marginBottom: '15px',
   },
   loading: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    padding: '40px',
-    color: '#6b7280'
+    padding: '20px',
+    textAlign: 'center',
+    color: '#666',
   },
-  spinner: {
-    width: '40px',
-    height: '40px',
-    border: '4px solid #e5e7eb',
-    borderTop: '4px solid #667eea',
-    borderRadius: '50%',
-    animation: 'spin 1s linear infinite',
-    marginBottom: '15px'
-  },
-  errorBox: {
+  emptyState: {
     padding: '30px',
     textAlign: 'center',
-    background: '#fef2f2',
-    borderRadius: '8px'
+    color: '#999',
+    background: '#f9fafb',
+    borderRadius: '12px',
   },
-  errorIcon: {
-    fontSize: '48px',
-    marginBottom: '15px'
-  },
-  errorText: {
-    color: '#dc2626',
-    fontSize: '16px',
-    marginBottom: '20px'
-  },
-  retryButton: {
-    padding: '10px 20px',
-    background: '#667eea',
-    color: 'white',
-    border: 'none',
-    borderRadius: '6px',
-    fontSize: '14px',
-    fontWeight: '500',
-    cursor: 'pointer'
-  },
-  errorBadge: {
-    padding: '6px 12px',
-    background: '#fef2f2',
-    color: '#dc2626',
-    borderRadius: '6px',
-    fontSize: '12px',
-    fontWeight: '500'
+  fileList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '15px',
   },
   fileCard: {
     background: '#f9fafb',
     padding: '20px',
-    borderRadius: '8px',
-    marginBottom: '15px',
-    border: '1px solid #e5e7eb'
+    borderRadius: '12px',
+    border: '2px solid #e5e7eb',
   },
   fileHeader: {
     display: 'flex',
     justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: '15px'
+    alignItems: 'center',
+    marginBottom: '15px',
   },
   fileName: {
-    fontSize: '18px',
+    fontSize: '16px',
     fontWeight: '600',
-    color: '#1f2937',
-    marginBottom: '5px'
+    color: '#333',
   },
-  fileInfo: {
-    fontSize: '14px',
-    color: '#6b7280'
+  badge: {
+    padding: '4px 12px',
+    borderRadius: '12px',
+    fontSize: '12px',
+    fontWeight: '600',
   },
-  status: {
-    padding: '6px 12px',
-    background: '#fff',
-    borderRadius: '6px',
-    fontSize: '14px',
-    fontWeight: '500',
-    border: '1px solid #e5e7eb'
+  processingBadge: {
+    background: '#dbeafe',
+    color: '#1e40af',
   },
   progressBar: {
-    width: '100%',
-    height: '20px',
+    height: '8px',
     background: '#e5e7eb',
-    borderRadius: '10px',
+    borderRadius: '4px',
     overflow: 'hidden',
-    marginBottom: '10px'
+    marginBottom: '10px',
   },
-  progressText: {
-    fontSize: '14px',
-    color: '#6b7280',
-    marginBottom: '15px'
+  progressFill: {
+    height: '100%',
+    background: 'linear-gradient(90deg, #667eea 0%, #764ba2 100%)',
+    transition: 'width 0.3s ease',
   },
-  actions: {
+  fileStats: {
     display: 'flex',
-    gap: '10px',
-    alignItems: 'center'
-  },
-  resumeButton: {
-    padding: '10px 20px',
-    background: 'linear-gradient(90deg, #10b981 0%, #059669 100%)',
-    color: 'white',
-    border: 'none',
-    borderRadius: '6px',
+    justifyContent: 'space-between',
     fontSize: '14px',
-    fontWeight: '500',
-    cursor: 'pointer'
+    color: '#666',
   },
-  cancelButton: {
-    padding: '10px 20px',
-    background: '#ef4444',
-    color: 'white',
-    border: 'none',
-    borderRadius: '6px',
-    fontSize: '14px',
-    fontWeight: '500',
-    cursor: 'pointer'
-  },
-  processingNote: {
-    flex: 1,
-    color: '#10b981',
-    fontSize: '14px',
-    fontWeight: '500'
-  }
 };

@@ -7,24 +7,32 @@ import CompletedFiles from './components/CompletedFiles';
 
 export default function Home() {
   const [error, setError] = useState(null);
-  const [cacheStats, setCacheStats] = useState(null);
+  const [stats, setStats] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
 
-  // Fetch cache stats
+  // ✅ Single fetch for all stats
   useEffect(() => {
-    const fetchCacheStats = async () => {
+    const fetchDashboardStats = async () => {
       try {
-        const response = await fetch('/api/cache-stats');
+        const response = await fetch('/api/dashboard-stats');
         const data = await response.json();
+        
         if (data.success) {
-          setCacheStats(data.stats);
+          setStats(data);
+          setIsLoading(false);
         }
       } catch (error) {
-        console.error('Failed to fetch cache stats:', error);
+        console.error('Failed to fetch stats:', error);
+        setError('Failed to load dashboard data');
+        setIsLoading(false);
       }
     };
     
-    fetchCacheStats();
-    const interval = setInterval(fetchCacheStats, 15000);
+    // Fetch immediately
+    fetchDashboardStats();
+    
+    // Then every 30 seconds (instead of 15)
+    const interval = setInterval(fetchDashboardStats, 30000);
     
     return () => clearInterval(interval);
   }, []);
@@ -71,31 +79,50 @@ export default function Home() {
         )}
 
         {/* Cache Stats Widget */}
-        {cacheStats && (
+        {stats?.cacheStats && (
           <div style={styles.cacheWidget}>
-            <h3 style={styles.cacheTitle}>⚡ Cache Performance</h3>
+            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px'}}>
+              <h3 style={styles.cacheTitle}>⚡ Cache Performance</h3>
+              {stats.cached && (
+                <span style={{fontSize: '12px', color: '#666'}}>
+                  Cached {stats.cacheAge}s ago
+                </span>
+              )}
+            </div>
             <div style={styles.cacheGrid}>
               <div style={styles.cacheTier}>
                 <div style={styles.tierIcon}>🔵</div>
-                <div style={styles.tierName}>App Memory</div>
-                <div style={styles.tierSpeed}>&lt;1ms</div>
+                <div style={styles.tierName}>Total Cached</div>
+                <div style={styles.tierSpeed}>Instant</div>
                 <div style={styles.tierSize}>
-                  {cacheStats.memorySize ? cacheStats.memorySize.toLocaleString() : '0'} entries
+                  {stats.cacheStats.total.toLocaleString()} phones
                 </div>
                 <div style={styles.tierUsage}>
-                  Hit Rate: {cacheStats.hitRate || 0}%
+                  Hit Rate: {stats.cacheStats.hitRate}%
                 </div>
               </div>
               
               <div style={styles.cacheTier}>
                 <div style={styles.tierIcon}>🟢</div>
-                <div style={styles.tierName}>Performance</div>
-                <div style={styles.tierSpeed}>10-30ms</div>
+                <div style={styles.tierName}>iPhones</div>
+                <div style={styles.tierSpeed}>Ready</div>
                 <div style={styles.tierSize}>
-                  Hits: {cacheStats.hits ? cacheStats.hits.toLocaleString() : '0'}
+                  {stats.cacheStats.iphones.toLocaleString()}
                 </div>
                 <div style={styles.tierUsage}>
-                  Misses: {cacheStats.misses ? cacheStats.misses.toLocaleString() : '0'}
+                  {Math.round((stats.cacheStats.iphones / stats.cacheStats.total) * 100)}% of total
+                </div>
+              </div>
+              
+              <div style={styles.cacheTier}>
+                <div style={styles.tierIcon}>🟡</div>
+                <div style={styles.tierName}>Androids</div>
+                <div style={styles.tierSpeed}>Ready</div>
+                <div style={styles.tierSize}>
+                  {stats.cacheStats.androids.toLocaleString()}
+                </div>
+                <div style={styles.tierUsage}>
+                  {Math.round((stats.cacheStats.androids / stats.cacheStats.total) * 100)}% of total
                 </div>
               </div>
             </div>
@@ -103,7 +130,7 @@ export default function Home() {
         )}
 
         {/* Active Processing Files */}
-        <ActiveFiles />
+        <ActiveFiles files={stats?.activeFiles} isLoading={isLoading} />
 
         {/* File Upload Interface */}
         <div style={styles.uploadSection}>
@@ -111,7 +138,7 @@ export default function Home() {
         </div>
 
         {/* Completed Files with Download */}
-        <CompletedFiles />
+        <CompletedFiles files={stats?.completedFiles} isLoading={isLoading} />
 
         {/* Instructions */}
         <div style={styles.instructions}>
@@ -132,6 +159,7 @@ export default function Home() {
 }
 
 const styles = {
+  // ... keep all your existing styles
   main: {
     minHeight: '100vh',
     background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
@@ -222,12 +250,11 @@ const styles = {
     fontSize: '20px',
     fontWeight: '700',
     color: '#1e40af',
-    marginBottom: '20px',
     margin: 0,
   },
   cacheGrid: {
     display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
+    gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
     gap: '15px',
   },
   cacheTier: {
