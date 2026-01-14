@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getConnection } from '../../../lib/db.js';
+import { executeWithRetry, executeMultiple } from '../../../lib/db.js';
 
 export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
@@ -18,7 +18,7 @@ const shouldLog = {
 class RateLimiter {
   constructor(maxPerSecond) {
     this.maxPerSecond = maxPerSecond;
-    this.minInterval = 1000 / maxPerSecond; // ms between calls
+    this.minInterval = 1000 / maxPerSecond;
     this.lastCallTime = 0;
     this.queue = [];
   }
@@ -43,7 +43,6 @@ class RateLimiter {
         const resolve = this.queue.shift();
         resolve();
         
-        // Process next in queue
         if (this.queue.length > 0) {
           this.processQueue();
         }
@@ -52,10 +51,9 @@ class RateLimiter {
   }
 }
 
-// ✅ Shared rate limiter: 2 requests per second across ALL chunks
 const globalRateLimiter = new RateLimiter(2);
 
-async function processChunk(pool, file, chunk, startTime, MAX_PROCESSING_TIME) {
+async function processChunk(file, chunk, startTime, MAX_PROCESSING_TIME) {
   try {
     const phoneData = JSON.parse(chunk.chunk_data);
     if (shouldLog.debug) {
@@ -79,7 +77,7 @@ async function processChunk(pool, file, chunk, startTime, MAX_PROCESSING_TIME) {
       const phone = phoneData[i];
       
       // ✅ Check cache first
-      const [cachedRows] = await pool.execute(
+      const [cachedRows] = await executeWithRetry(
         `SELECT * FROM blooio_cache WHERE e164 = ? LIMIT 1`,
         [phone.e164]
       );
@@ -101,13 +99,12 @@ async function processChunk(pool, file, chunk, startTime, MAX_PROCESSING_TIME) {
         continue;
       }
       
-      // ✅ Not in cache - call API with GLOBAL rate limiting
+      // ✅ Not in cache - call API
       let success = false;
       let lastError = null;
       
       for (let attempt = 0; attempt < MAX_RETRIES && !success; attempt++) {
         try {
-          // ✅ Wait for rate limiter slot (coordinated across all chunks)
           await globalRateLimiter.waitForSlot();
           
           const response = await fetch(
@@ -157,10 +154,6 @@ async function processChunk(pool, file, chunk, startTime, MAX_PROCESSING_TIME) {
           const supportsIMessage = capabilities.imessage === true;
           const supportsSMS = capabilities.sms === true;
           
-          if (!supportsIMessage && !supportsSMS && shouldLog.warn) {
-            console.warn(`[Chunk ${chunk.id}] No capabilities: ${phone.e164}`);
-          }
-          
           const contactType = supportsIMessage ? 'iPhone' : (supportsSMS ? 'Android' : 'Unknown');
           
           const result = {
@@ -177,7 +170,7 @@ async function processChunk(pool, file, chunk, startTime, MAX_PROCESSING_TIME) {
           results.push(result);
           
           // ✅ Cache successful results
-          await pool.execute(
+          await executeWithRetry(
             `INSERT INTO blooio_cache 
              (e164, is_ios, supports_imessage, supports_sms, contact_type)
              VALUES (?, ?, ?, ?, ?)
@@ -235,7 +228,6 @@ async function processChunk(pool, file, chunk, startTime, MAX_PROCESSING_TIME) {
       
       processedCount++;
       
-      // Log progress every 50 phones
       if (shouldLog.info && processedCount % 50 === 0) {
         console.log(`[Chunk ${chunk.id}] ${processedCount}/${phoneData.length} phones (Cache: ${cacheHits}, API: ${apiCalls})`);
       }
@@ -269,12 +261,11 @@ async function processQueue(request) {
     console.log(`[${new Date().toISOString()}] Process queue started`);
   }
   
-  const pool = await getConnection();
   let hasLock = false;
   
   try {
-    // ✅ Database lock prevents multiple function instances
-    const [lockResult] = await pool.execute(
+    // ✅ Database lock
+    const [lockResult] = await executeWithRetry(
       `SELECT GET_LOCK('process_queue_lock', 0) as locked`
     );
     
@@ -291,7 +282,7 @@ async function processQueue(request) {
     
     hasLock = true;
     
-    const [files] = await pool.execute(
+    const [files] = await executeWithRetry(
       `SELECT * FROM uploaded_files 
        WHERE processing_status IN ('initialized', 'processing')
        AND processing_offset < processing_total
@@ -315,10 +306,8 @@ async function processQueue(request) {
       console.log(`Processing file ${file.id}: ${file.processing_offset}/${file.processing_total} (${file.processing_progress}%)`);
     }
     
-    await pool.execute(
-      `UPDATE uploaded_files 
-       SET processing_status = 'processing'
-       WHERE id = ?`,
+    await executeWithRetry(
+      `UPDATE uploaded_files SET processing_status = 'processing' WHERE id = ?`,
       [file.id]
     );
     
@@ -328,8 +317,7 @@ async function processQueue(request) {
     let chunksProcessed = 0;
     
     while (Date.now() - startTime < MAX_PROCESSING_TIME) {
-      // ✅ Get 2 pending chunks for parallel processing
-      const [chunks] = await pool.execute(
+      const [chunks] = await executeWithRetry(
         `SELECT * FROM processing_chunks
          WHERE file_id = ? 
          AND chunk_status IN ('pending', 'failed')
@@ -339,7 +327,7 @@ async function processQueue(request) {
              WHEN 'failed' THEN 1 
            END,
            chunk_offset ASC
-         LIMIT 2`,  // ✅ Get 2 chunks
+         LIMIT 2`,
         [file.id]
       );
       
@@ -352,26 +340,26 @@ async function processQueue(request) {
       
       // Mark chunks as processing
       for (const chunk of chunks) {
-        await pool.execute(
+        await executeWithRetry(
           `UPDATE processing_chunks SET chunk_status = 'processing' WHERE id = ?`,
           [chunk.id]
         );
       }
       
-      // ✅ Process chunks in parallel with shared rate limiter
+      // ✅ Process chunks in parallel
       const chunkPromises = chunks.map(chunk => 
-        processChunk(pool, file, chunk, startTime, MAX_PROCESSING_TIME)
+        processChunk(file, chunk, startTime, MAX_PROCESSING_TIME)
       );
       
       const chunkResults = await Promise.all(chunkPromises);
       
-      // ✅ Save results and update chunks
+      // ✅ Save results
       for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
         const chunkResult = chunkResults[i];
         
         if (!chunkResult.success) {
-          await pool.execute(
+          await executeWithRetry(
             `UPDATE processing_chunks SET chunk_status = 'failed' WHERE id = ?`,
             [chunk.id]
           );
@@ -381,10 +369,10 @@ async function processQueue(request) {
         // Save results
         if (chunkResult.results.length > 0) {
           const values = chunkResult.results.map(r => 
-            `(${file.id}, ${pool.escape(r.phone_number)}, ${pool.escape(r.e164)}, ${r.is_ios}, ${r.supports_imessage}, ${r.supports_sms}, ${pool.escape(r.contact_type)}, ${pool.escape(r.error)}, ${r.from_cache ? 1 : 0})`
+            `(${file.id}, '${r.phone_number.replace(/'/g, "''")}', '${r.e164}', ${r.is_ios}, ${r.supports_imessage}, ${r.supports_sms}, '${r.contact_type}', ${r.error ? `'${r.error.replace(/'/g, "''")}'` : 'NULL'}, ${r.from_cache ? 1 : 0})`
           ).join(',');
           
-          await pool.execute(
+          await executeWithRetry(
             `INSERT INTO blooio_results 
              (file_id, phone_number, e164, is_ios, supports_imessage, supports_sms, contact_type, error, from_cache)
              VALUES ${values}`
@@ -393,20 +381,19 @@ async function processQueue(request) {
         
         // Handle partial/complete chunks
         if (chunkResult.fullyProcessed) {
-          await pool.execute(
+          await executeWithRetry(
             `UPDATE processing_chunks SET chunk_status = 'completed' WHERE id = ?`,
             [chunk.id]
           );
         } else {
-          // Create new chunk with remaining phones
           if (chunkResult.remainingPhones.length > 0) {
-            const [fileCheck] = await pool.execute(
+            const [fileCheck] = await executeWithRetry(
               `SELECT processing_offset, processing_total FROM uploaded_files WHERE id = ?`,
               [file.id]
             );
             
             if (fileCheck[0].processing_offset + chunkResult.remainingPhones.length <= fileCheck[0].processing_total) {
-              await pool.execute(
+              await executeWithRetry(
                 `INSERT INTO processing_chunks (file_id, chunk_offset, chunk_data, chunk_status)
                  VALUES (?, ?, ?, 'pending')`,
                 [
@@ -418,14 +405,14 @@ async function processQueue(request) {
             }
           }
           
-          await pool.execute(
+          await executeWithRetry(
             `UPDATE processing_chunks SET chunk_status = 'completed' WHERE id = ?`,
             [chunk.id]
           );
         }
         
         // Update file progress
-        await pool.execute(
+        await executeWithRetry(
           `UPDATE uploaded_files 
            SET processing_offset = processing_offset + ?,
                processing_progress = ROUND((processing_offset + ?) / processing_total * 100, 2)
@@ -439,8 +426,8 @@ async function processQueue(request) {
         chunksProcessed++;
       }
       
-      // Log combined progress
-      const [updatedFile] = await pool.execute(
+      // Log progress
+      const [updatedFile] = await executeWithRetry(
         `SELECT processing_offset, processing_progress FROM uploaded_files WHERE id = ?`,
         [file.id]
       );
@@ -459,14 +446,14 @@ async function processQueue(request) {
     }
     
     // Check completion
-    const [updatedFile] = await pool.execute(
+    const [updatedFile] = await executeWithRetry(
       `SELECT * FROM uploaded_files WHERE id = ?`,
       [file.id]
     );
     
     const currentFile = updatedFile[0];
     
-    const [pendingChunks] = await pool.execute(
+    const [pendingChunks] = await executeWithRetry(
       `SELECT COUNT(*) as pending_count 
        FROM processing_chunks 
        WHERE file_id = ? 
@@ -475,7 +462,7 @@ async function processQueue(request) {
     );
     
     if (currentFile.processing_offset >= currentFile.processing_total && pendingChunks[0].pending_count === 0) {
-      const [qualityCheck] = await pool.execute(`
+      const [qualityCheck] = await executeWithRetry(`
         SELECT 
           COUNT(*) as total,
           SUM(CASE WHEN supports_imessage = 1 THEN 1 ELSE 0 END) as iphones,
@@ -494,7 +481,7 @@ async function processQueue(request) {
         console.warn(`Quality warning: ${iphonePct.toFixed(1)}% iPhones, ${errorPct.toFixed(1)}% errors`);
       }
       
-      await pool.execute(
+      await executeWithRetry(
         `UPDATE uploaded_files 
          SET processing_status = 'completed',
              processing_progress = 100
@@ -532,7 +519,7 @@ async function processQueue(request) {
   } finally {
     if (hasLock) {
       try {
-        await pool.execute(`SELECT RELEASE_LOCK('process_queue_lock')`);
+        await executeWithRetry(`SELECT RELEASE_LOCK('process_queue_lock')`);
       } catch (err) {
         console.error('Lock release error:', err);
       }
