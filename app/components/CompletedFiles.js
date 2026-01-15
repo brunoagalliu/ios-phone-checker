@@ -1,6 +1,11 @@
 'use client';
 
 export default function CompletedFiles({ files, isLoading }) {
+  const handleDownload = (fileId, fileName) => {
+    // Direct download from API
+    window.location.href = `/api/download-results?fileId=${fileId}`;
+  };
+
   if (isLoading) {
     return (
       <div style={styles.section}>
@@ -33,15 +38,12 @@ export default function CompletedFiles({ files, isLoading }) {
             </div>
             <div style={styles.fileStats}>
               <span>{file.processing_total?.toLocaleString()} phones processed</span>
-              {file.results_file_url && (
-                <a 
-                  href={file.results_file_url} 
-                  download
-                  style={styles.downloadButton}
-                >
-                  ⬇️ Download
-                </a>
-              )}
+              <button 
+                onClick={() => handleDownload(file.id, file.file_name)}
+                style={styles.downloadButton}
+              >
+                ⬇️ Download Results
+              </button>
             </div>
           </div>
         ))}
@@ -115,9 +117,11 @@ const styles = {
     padding: '8px 16px',
     background: '#667eea',
     color: 'white',
+    border: 'none',
     borderRadius: '8px',
-    textDecoration: 'none',
     fontSize: '14px',
     fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'background 0.2s',
   },
 };

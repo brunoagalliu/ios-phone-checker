@@ -1,7 +1,6 @@
 import { NextResponse } from 'next/server';
-import { getConnection } from '../../../lib/db.js';
+import { executeWithRetry } from '../../../lib/db.js';
 
-export const maxDuration = 60;
 export const dynamic = 'force-dynamic';
 
 export async function GET(request) {
@@ -10,66 +9,61 @@ export async function GET(request) {
     const fileId = searchParams.get('fileId');
     
     if (!fileId) {
-      return NextResponse.json({
-        success: false,
-        error: 'File ID is required'
-      }, { status: 400 });
+      return NextResponse.json({ error: 'fileId required' }, { status: 400 });
     }
     
-    const connection = await getConnection();
-    
-    // Get file info
-    const [files] = await connection.execute(
-      `SELECT * FROM uploaded_files WHERE id = ?`,
-      [fileId]
-    );
-    
-    if (files.length === 0) {
-      return NextResponse.json({
-        success: false,
-        error: 'File not found'
-      }, { status: 404 });
-    }
-    
-    const file = files[0];
-    
-    // Get results
-    const [results] = await connection.execute(
-      `SELECT 
-        phone_number,
-        e164,
-        is_ios,
-        supports_imessage,
-        supports_sms,
-        contact_type,
-        error,
-        from_cache
+    // Get all results
+    const [results] = await executeWithRetry(
+      `SELECT phone_number, e164, supports_imessage, supports_sms, contact_type, error
        FROM blooio_results
        WHERE file_id = ?
        ORDER BY id ASC`,
       [fileId]
     );
     
-    // Generate CSV
-    const csvHeader = 'Phone Number,E164,Is iOS,Supports iMessage,Supports SMS,Contact Type,Error,From Cache\n';
-    const csvRows = results.map(r => 
-      `${r.phone_number},${r.e164},${r.is_ios ? 'Yes' : 'No'},${r.supports_imessage ? 'Yes' : 'No'},${r.supports_sms ? 'Yes' : 'No'},${r.contact_type || ''},${r.error || ''},${r.from_cache ? 'Yes' : 'No'}`
-    ).join('\n');
+    if (results.length === 0) {
+      return NextResponse.json({ error: 'No results found' }, { status: 404 });
+    }
     
-    const csv = csvHeader + csvRows;
+    // Generate CSV
+    const headers = ['phone_number', 'e164', 'supports_imessage', 'supports_sms', 'contact_type', 'error'];
+    const csvRows = [headers.join(',')];
+    
+    for (const row of results) {
+      const values = headers.map(header => {
+        const value = row[header];
+        if (value === null || value === undefined) return '';
+        // Escape commas and quotes
+        const stringValue = String(value);
+        if (stringValue.includes(',') || stringValue.includes('"') || stringValue.includes('\n')) {
+          return `"${stringValue.replace(/"/g, '""')}"`;
+        }
+        return stringValue;
+      });
+      csvRows.push(values.join(','));
+    }
+    
+    const csv = csvRows.join('\n');
+    
+    // Get filename
+    const [fileInfo] = await executeWithRetry(
+      `SELECT file_name FROM uploaded_files WHERE id = ?`,
+      [fileId]
+    );
+    
+    const filename = fileInfo[0]?.file_name || `results_${fileId}.csv`;
+    const resultsFilename = filename.replace('.csv', '_results.csv');
     
     return new NextResponse(csv, {
       headers: {
         'Content-Type': 'text/csv',
-        'Content-Disposition': `attachment; filename="results_${file.file_name}"`
-      }
+        'Content-Disposition': `attachment; filename="${resultsFilename}"`,
+        'Cache-Control': 'no-cache',
+      },
     });
     
   } catch (error) {
     console.error('Download error:', error);
-    return NextResponse.json({
-      success: false,
-      error: error.message
-    }, { status: 500 });
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
